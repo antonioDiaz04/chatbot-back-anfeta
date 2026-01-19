@@ -604,7 +604,6 @@ export async function getActividadesConRevisiones(req, res) {
     );
 
     const actividadesRaw = actividadesResponse.data.data;
-    console.log("Actividades del día:", actividadesRaw);
 
     if (!Array.isArray(actividadesRaw) || actividadesRaw.length === 0) {
       return res.json({
@@ -645,14 +644,12 @@ export async function getActividadesConRevisiones(req, res) {
       actividadesFiltradas = actividadesRaw;
       mensajeHorario = "Mostrando todas las actividades del día";
       mostrarSoloConTiempo = false;
-      console.log("Mostrando TODAS las actividades:", actividadesFiltradas);
     } else {
       // Filtrar SOLO la actividad con horario 09:30-16:30
       actividadesFiltradas = actividadesRaw.filter((a) => {
         return a.horaInicio === '09:30' && a.horaFin === '16:30';
       });
       mensajeHorario = "Actividades en horario 09:30-16:30";
-      console.log("Actividades filtradas (09:30-16:30):", actividadesFiltradas);
 
       if (actividadesFiltradas.length === 0) {
         return res.json({

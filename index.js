@@ -11,6 +11,7 @@ import { connectDB } from "./src/database/db.js";
 
 // Importar rutas
 import assistantRoutes from "./src/routes/assistant.routes.js";
+import authRoutes from "./src/routes/auth.routes.js";
 
 
 
@@ -21,8 +22,8 @@ connectDB();
 
 // CORS
 app.use(cors({
-  // origin: CORS_ORIGINS,
-  origin: "*",
+  origin: CORS_ORIGINS,
+  // origin: "*",
   credentials: true,
   methods: ["GET", "POST", "PUT", "DELETE"],
 }));
@@ -58,7 +59,8 @@ app.use((req, res, next) => {
 });
 
 //Rutas
-app.use(`/api/v1/assistant`, assistantRoutes);
+app.use(`/api/${API_VERSION}/assistant`, assistantRoutes);
+app.use(`/api/${API_VERSION}/auth`, authRoutes);
 
 
 

@@ -2,7 +2,7 @@
 export const PORT = process.env.PORT || 4000;
 export const API_VERSION = process.env.API_VERSION || "v1";
 
-export const CORS_ORIGINS = process.env.CORS_ORIGINS ||  "http://localhost:4200";
+export const CORS_ORIGINS = process.env.CORS_ORIGINS ||  "http://localhost:3000";
 
 //Conexion a la base de datos
 export const MONGO_URI = process.env.MONGO_URI || "mongodb+srv://usuario:"
@@ -14,3 +14,6 @@ export const GEMINI_API_KEY = process.env.GEMINI_API_KEY
 export const GROQ_API_KEY_1 = process.env.GROQ_API_KEY_1; //esta es mi cuenta personal "20221076@uthh.edu.mx"
 export const GROQ_API_KEY_2 = process.env.GROQ_API_KEY_2; //esta es mi cuenta personal "ech19413070170002@gmail.com"
 
+//Credenciales
+export const TOKEN_SECRET = process.env.TOKEN_SECRET;
+export const JWT_SECRET = process.env.JWT_SECRET;
