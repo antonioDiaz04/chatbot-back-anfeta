@@ -3,6 +3,8 @@ import { getAllUsers } from './users.controller.js';
 import { isGeminiQuotaError } from '../libs/geminiRetry.js'
 import { sanitizeObject } from '../libs/sanitize.js'
 import { smartAICall } from '../libs/aiService.js';
+import ActividadPendientes from "../models/actividades.model.js";
+import HistorialBot from "../models/historialBot.model.js";
 
 const urlApi = 'https://wlserver-production.up.railway.app/api';
 
@@ -14,6 +16,37 @@ function horaAMinutos(hora) {
   if (!hora) return null;
   const [h, m] = hora.split(':').map(Number);
   return h * 60 + m;
+}
+
+/**
+ * Guarda un mensaje en el historial del bot (MongoDB).
+ * @param {String} odooUserId - ID del usuario en Odoo
+ * @param {String} sessionId - ID de la sesión actual
+ * @param {String} role - 'usuario' o 'bot'
+ * @param {String} contenido - Contenido del mensaje
+ * @returns {Promise<Object>} - El documento actualizado
+ */
+async function guardarMensajeHistorial(odooUserId, sessionId, role, contenido) {
+  try {
+    if (!odooUserId || !sessionId || !role || !contenido) {
+      console.warn("Faltan datos para guardar en historial:", { odooUserId, sessionId, role, contenido: contenido?.substring(0, 50) });
+      return null;
+    }
+
+    const registro = await HistorialBot.findOneAndUpdate(
+      { odooUserId, sessionId },
+      {
+        $push: { mensajes: { role, contenido, timestamp: new Date() } },
+        $setOnInsert: { odooUserId, sessionId }
+      },
+      { new: true, upsert: true }
+    );
+
+    return registro;
+  } catch (error) {
+    console.error("Error guardando mensaje en historial:", error.message);
+    return null;
+  }
 }
 
 
@@ -31,10 +64,26 @@ export async function chatInteractivo(req, res) {
       });
     }
 
+    // Obtener usuario para el historial
+    const usersData = await getAllUsers();
+    const user = usersData.items.find(
+      (u) => u.email.toLowerCase() === email.toLowerCase()
+    );
+
+    if (!user) {
+      return res.status(404).json({
+        success: false,
+        message: "Usuario no encontrado"
+      });
+    }
+
+    const odooUserId = user.id || user._id || email;
+
     // 1. Obtener o crear contexto de conversación
     if (!conversaciones.has(sessionId)) {
       conversaciones.set(sessionId, {
-        userId: email,
+        odooUserId: odooUserId,
+        email: email,
         historial: [],
         datosActividades: null,
         ultimaConsulta: null,
@@ -47,13 +96,16 @@ export async function chatInteractivo(req, res) {
     const contexto = conversaciones.get(sessionId);
     limpiarConversacionesAntiguas();
 
-    // 2. Agregar mensaje del usuario al historial
+    // 2. Agregar mensaje del usuario al historial en memoria
     contexto.historial.push({
       role: 'user',
       content: message,
       timestamp: new Date().toISOString(),
-      esConsultaActividades: false // Se actualizará después
+      esConsultaActividades: false
     });
+
+    // ✅ Guardar mensaje del usuario en MongoDB
+    await guardarMensajeHistorial(odooUserId, sessionId, "usuario", message);
 
     // 3. Detectar tipo de mensaje
     const palabrasClaveActividades = [
@@ -96,7 +148,7 @@ export async function chatInteractivo(req, res) {
       contexto.estado = 'tiene_datos';
       contexto.ultimasSugerencias = resultadoActividades.sugerencias || [];
 
-      // Agregar respuesta al historial
+      // Agregar respuesta al historial en memoria
       contexto.historial.push({
         role: 'assistant',
         content: resultadoActividades.answer,
@@ -104,6 +156,9 @@ export async function chatInteractivo(req, res) {
         tipo: 'actividades',
         datosDisponibles: true
       });
+
+      // ✅ Guardar respuesta del bot en MongoDB
+      await guardarMensajeHistorial(odooUserId, sessionId, "bot", resultadoActividades.answer);
 
       respuesta = {
         success: true,
@@ -133,13 +188,16 @@ export async function chatInteractivo(req, res) {
       const promptContexto = construirPromptContexto(contexto, message);
       const aiResult = await smartAICall(promptContexto);
 
-      // Guardar respuesta en historial
+      // Guardar respuesta en historial en memoria
       contexto.historial.push({
         role: 'assistant',
         content: aiResult.text,
         timestamp: new Date().toISOString(),
         tipo: 'conversacion'
       });
+
+      // ✅ Guardar respuesta del bot en MongoDB
+      await guardarMensajeHistorial(odooUserId, sessionId, "bot", aiResult.text);
 
       // Actualizar estado
       contexto.estado = determinarNuevoEstado(aiResult.text, contexto);
@@ -210,6 +268,7 @@ export async function chatInteractivo(req, res) {
     });
   }
 }
+
 async function obtenerYProcesarActividades(email, question, sessionId) {
   try {
     const showAll = question.toLowerCase().includes("todos") ||
@@ -225,7 +284,7 @@ async function obtenerYProcesarActividades(email, question, sessionId) {
       throw new Error('Usuario no encontrado');
     }
 
-    // 1️⃣ Obtener actividades del día
+    // Obtener actividades del día
     const actividadesResponse = await axios.get(
       `${urlApi}/actividades/assignee/${email}/del-dia`
     );
@@ -293,10 +352,10 @@ async function obtenerYProcesarActividades(email, question, sessionId) {
       mostrarSoloConTiempo = false;
     }
 
-    // 2️⃣ Extraer IDs de actividades
+    // Extraer IDs de actividades
     const actividadIds = actividadesFiltradas.map(a => a.id);
 
-    // 3️⃣ Obtener revisiones del día
+    // Obtener revisiones del día
     const today = new Date();
     const formattedToday = today.toISOString().split('T')[0];
 
@@ -546,8 +605,8 @@ INSTRUCCIONES DE RESPUESTA:
         actividades: actividadesEstructuradas,
         revisionesPorActividad: revisionesEstructuradas
       },
-      sugerencias: sugerencias.slice(0, 5), // Máximo 5 sugerencias
-      sessionId: sessionId // Incluir sessionId recibido
+      sugerencias: sugerencias.slice(0, 5),
+      sessionId: sessionId
     };
 
   } catch (error) {
@@ -577,6 +636,7 @@ INSTRUCCIONES DE RESPUESTA:
     };
   }
 }
+
 export async function getActividadesConRevisiones(req, res) {
   try {
     const { email, question = "¿Qué actividades y revisiones tengo hoy? ¿Qué me recomiendas priorizar?", showAll = false } = sanitizeObject(req.body);
@@ -598,6 +658,11 @@ export async function getActividadesConRevisiones(req, res) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
 
+    const odooUserId = user.id || user._id || email;
+
+    // ✅ Guardar mensaje del usuario en historial
+    await guardarMensajeHistorial(odooUserId, sessionId, "usuario", question);
+
     // 1️⃣ Obtener actividades del día para el usuario
     const actividadesResponse = await axios.get(
       `${urlApi}/actividades/assignee/${email}/del-dia`
@@ -606,9 +671,15 @@ export async function getActividadesConRevisiones(req, res) {
     const actividadesRaw = actividadesResponse.data.data;
 
     if (!Array.isArray(actividadesRaw) || actividadesRaw.length === 0) {
+      const respuestaSinActividades = "No tienes actividades registradas para hoy";
+
+      // ✅ Guardar respuesta del bot en historial
+      await guardarMensajeHistorial(odooUserId, sessionId, "bot", respuestaSinActividades);
+
       return res.json({
         success: true,
-        answer: "No tienes actividades registradas para hoy",
+        answer: respuestaSinActividades,
+        sessionId: sessionId,
         actividades: [],
         revisionesPorActividad: {}
       });
@@ -652,9 +723,15 @@ export async function getActividadesConRevisiones(req, res) {
       mensajeHorario = "Actividades en horario 09:30-16:30";
 
       if (actividadesFiltradas.length === 0) {
+        const respuestaSinHorario = "No tienes actividades programadas en el horario de 09:30 a 16:30";
+
+        // ✅ Guardar respuesta del bot en historial
+        await guardarMensajeHistorial(odooUserId, sessionId, "bot", respuestaSinHorario);
+
         return res.json({
           success: true,
-          answer: "No tienes actividades programadas en el horario de 09:30 a 16:30",
+          answer: respuestaSinHorario,
+          sessionId: sessionId,
           actividades: actividadesRaw.map(a => ({
             id: a.id,
             titulo: a.titulo,
@@ -897,6 +974,9 @@ EJEMPLO DE RESPUESTA:
     // 8️⃣ Obtener respuesta de IA
     const aiResult = await smartAICall(prompt);
 
+    // ✅ Guardar respuesta del bot en historial
+    await guardarMensajeHistorial(odooUserId, sessionId, "bot", aiResult.text);
+
     // 9️⃣ Preparar respuesta según el tipo
     let respuestaData = {
       actividades: actividadesFiltradas.map(a => ({
@@ -1033,6 +1113,7 @@ async function obtenerActividadesYRevisiones(email) {
     };
   }
 }
+
 export async function seleccionarSugerencia(req, res) {
   try {
     const { email, sessionId, suggestionIndex, suggestionText } = sanitizeObject(req.body);
@@ -1055,7 +1136,7 @@ export async function seleccionarSugerencia(req, res) {
     const contexto = conversaciones.get(sessionId);
 
     // Verificar que el email coincide
-    if (contexto.userId !== email) {
+    if (contexto.email !== email) {
       return res.status(403).json({
         success: false,
         message: "Email no coincide con la sesión"
@@ -1085,7 +1166,7 @@ export async function seleccionarSugerencia(req, res) {
         email: email,
         message: sugerenciaSeleccionada,
         sessionId: sessionId,
-        selectedSuggestion: suggestionIndex // Pasar el índice seleccionado
+        selectedSuggestion: suggestionIndex
       }
     };
 
@@ -1147,7 +1228,7 @@ function generarSugerencias(estado, contexto = null) {
       "¿Quieres otra perspectiva?",
       "¿Necesitas ayuda para implementarlo?"
     ],
-    revisando_tareas: [ // ✅ NUEVO estado
+    revisando_tareas: [
       "¿Quieres ver los detalles de esta tarea?",
       "¿Necesitas desglosar el tiempo por subtareas?",
       "¿Quieres saber las dependencias de esta tarea?"
@@ -1293,6 +1374,9 @@ export async function devuelveActividades(req, res) {
   try {
     const { email } = sanitizeObject(req.body);
 
+    // Obtener el ID del usuario desde el token (viene del middleware de auth)
+    const sessionUserId = req.user?.id || req.user?._id;
+
     const usersData = await getAllUsers();
     const user = usersData.items.find(
       (u) => u.email.toLowerCase() === email.toLowerCase()
@@ -1302,6 +1386,17 @@ export async function devuelveActividades(req, res) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
 
+    // Generar sessionId para esta consulta
+    const sessionId = `act_${sessionUserId}_${Date.now()}`.replace(/[^a-zA-Z0-9_]/g, '_');
+
+    // ✅ Guardar consulta del usuario en historial
+    await guardarMensajeHistorial(
+      sessionUserId,
+      sessionId,
+      "usuario",
+      `Consulta de actividades del día para ${email}`
+    );
+
     const response = await axios.get(
       `${urlApi}/actividades/assignee/${email}/del-dia`
     );
@@ -1309,6 +1404,13 @@ export async function devuelveActividades(req, res) {
     const actividadesRaw = response.data.data;
 
     if (!Array.isArray(actividadesRaw)) {
+      // ✅ Guardar respuesta del bot en historial
+      await guardarMensajeHistorial(
+        sessionUserId,
+        sessionId,
+        "bot",
+        "No se encontraron actividades (respuesta inválida)"
+      );
       return res.json([]);
     }
 
@@ -1322,6 +1424,13 @@ export async function devuelveActividades(req, res) {
 
     // 2. Si no hay actividad en ese horario, retornar array vacío
     if (!actividadSeleccionada) {
+      // ✅ Guardar respuesta del bot en historial
+      await guardarMensajeHistorial(
+        sessionUserId,
+        sessionId,
+        "bot",
+        "No hay actividades en horario 09:30-16:30"
+      );
       return res.json([]);
     }
 
@@ -1343,6 +1452,14 @@ export async function devuelveActividades(req, res) {
       ? [resultado]
       : [];
 
+    // ✅ Guardar respuesta del bot en historial
+    await guardarMensajeHistorial(
+      sessionUserId,
+      sessionId,
+      "bot",
+      `Actividad encontrada: "${resultado.t}" con ${resultado.p} pendientes`
+    );
+
     return res.json(actividadesFiltradas);
 
   } catch (error) {
@@ -1356,7 +1473,7 @@ export async function devuelveActividades(req, res) {
 
 export async function devuelveActReviciones(req, res) {
   try {
-    const { email, idsAct } = sanitizeObject(req.body);
+    const { email, idsAct, sessionId: reqSessionId } = sanitizeObject(req.body);
 
     if (!email || !Array.isArray(idsAct)) {
       return res.status(400).json({
@@ -1364,6 +1481,23 @@ export async function devuelveActReviciones(req, res) {
         message: "Parámetros inválidos"
       });
     }
+
+    // Obtener usuario para historial
+    const usersData = await getAllUsers();
+    const user = usersData.items.find(
+      (u) => u.email.toLowerCase() === email.toLowerCase()
+    );
+
+    const odooUserId = user?.id || user?._id || email;
+    const sessionId = reqSessionId || `rev_${email}_${Date.now()}`.replace(/[^a-zA-Z0-9_]/g, '_');
+
+    // ✅ Guardar consulta del usuario en historial
+    await guardarMensajeHistorial(
+      odooUserId,
+      sessionId,
+      "usuario",
+      `Consulta de revisiones para ${idsAct.length} actividades`
+    );
 
     const today = new Date();
     const formattedToday = today.toISOString().split('T')[0];
@@ -1418,9 +1552,21 @@ export async function devuelveActReviciones(req, res) {
       });
     });
 
+    const resultado = Array.from(actividadesRevi.values());
+    const totalPendientes = resultado.reduce((sum, act) => sum + act.pendientes.length, 0);
+
+    // ✅ Guardar respuesta del bot en historial
+    await guardarMensajeHistorial(
+      odooUserId,
+      sessionId,
+      "bot",
+      `Se encontraron ${resultado.length} actividades con ${totalPendientes} pendientes totales.`
+    );
+
     return res.status(200).json({
       success: true,
-      data: Array.from(actividadesRevi.values())
+      sessionId: sessionId,
+      data: resultado
     });
 
   } catch (error) {
@@ -1432,6 +1578,172 @@ export async function devuelveActReviciones(req, res) {
       });
     }
 
+    return res.status(500).json({
+      success: false,
+      message: "Error interno"
+    });
+  }
+}
+
+export async function guardarPendientes(req, res) {
+  try {
+    // Acepta tanto userId como odooUserId para compatibilidad
+    const { userId, odooUserId, activityId, pendientes, sessionId: reqSessionId } = req.body;
+
+    // Usar odooUserId si existe, sino usar userId
+    const finalUserId = odooUserId || userId;
+
+    if (!finalUserId || !activityId || !Array.isArray(pendientes)) {
+      console.log("error datos faltentes o los pendientes no son un array")
+      return res.status(400).json({
+        error: "Faltan datos requeridos"
+      });
+    }
+
+    const sessionId = reqSessionId || `pend_${finalUserId}_${Date.now()}`.replace(/[^a-zA-Z0-9_]/g, '_');
+
+    // ✅ Guardar acción del usuario en historial
+    await guardarMensajeHistorial(
+      finalUserId,
+      sessionId,
+      "usuario",
+      `Guardando ${pendientes.length} pendientes para la actividad ${activityId}`
+    );
+
+    const registro = await ActividadPendientes.create({
+      userId: finalUserId,  // Guardar con el campo original del modelo
+      activityId,
+      pendientes
+    });
+
+    // ✅ Guardar confirmación del bot en historial
+    await guardarMensajeHistorial(
+      finalUserId,
+      sessionId,
+      "bot",
+      `Se guardaron exitosamente ${pendientes.length} pendientes. ID: ${registro._id}`
+    );
+
+    res.status(201).json({
+      ...registro.toObject(),
+      sessionId: sessionId
+    });
+  } catch (error) {
+    console.error("Error en guardarPendientes:", error);
+    res.status(500).json({ error: error.message });
+  }
+}
+
+// ✅ NUEVAS FUNCIONES: Obtener historial desde MongoDB
+
+/**
+ * Obtiene el historial de una sesión específica
+ */
+export async function obtenerHistorialSesion(req, res) {
+  try {
+    const { odooUserId, sessionId } = sanitizeObject(req.query);
+
+    if (!odooUserId || !sessionId) {
+      return res.status(400).json({
+        success: false,
+        message: "odooUserId y sessionId son requeridos"
+      });
+    }
+
+    const historial = await HistorialBot.findOne({ odooUserId, sessionId });
+
+    if (!historial) {
+      return res.status(404).json({
+        success: false,
+        message: "No se encontró historial para esta sesión"
+      });
+    }
+
+    return res.json({
+      success: true,
+      data: historial
+    });
+
+  } catch (error) {
+    console.error("Error obteniendo historial:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error interno"
+    });
+  }
+}
+
+/**
+ * Obtiene todos los historiales de un usuario con paginación
+ */
+export async function obtenerHistorialesUsuario(req, res) {
+  try {
+    const { odooUserId, limit = 10, skip = 0 } = sanitizeObject(req.query);
+
+    if (!odooUserId) {
+      return res.status(400).json({
+        success: false,
+        message: "odooUserId es requerido"
+      });
+    }
+
+    const historiales = await HistorialBot.find({ odooUserId })
+      .sort({ updatedAt: -1 })
+      .limit(parseInt(limit))
+      .skip(parseInt(skip));
+
+    const total = await HistorialBot.countDocuments({ odooUserId });
+
+    return res.json({
+      success: true,
+      data: historiales,
+      pagination: {
+        total,
+        limit: parseInt(limit),
+        skip: parseInt(skip),
+        hasMore: (parseInt(skip) + historiales.length) < total
+      }
+    });
+
+  } catch (error) {
+    console.error("Error obteniendo historiales:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error interno"
+    });
+  }
+}
+
+/**
+ * Elimina el historial de una sesión específica
+ */
+export async function eliminarHistorialSesion(req, res) {
+  try {
+    const { odooUserId, sessionId } = sanitizeObject(req.body);
+
+    if (!odooUserId || !sessionId) {
+      return res.status(400).json({
+        success: false,
+        message: "odooUserId y sessionId son requeridos"
+      });
+    }
+
+    const resultado = await HistorialBot.deleteOne({ odooUserId, sessionId });
+
+    if (resultado.deletedCount === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No se encontró historial para eliminar"
+      });
+    }
+
+    return res.json({
+      success: true,
+      message: "Historial eliminado correctamente"
+    });
+
+  } catch (error) {
+    console.error("Error eliminando historial:", error);
     return res.status(500).json({
       success: false,
       message: "Error interno"
