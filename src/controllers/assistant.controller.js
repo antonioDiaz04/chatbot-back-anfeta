@@ -4,7 +4,7 @@ import { isGeminiQuotaError } from '../libs/geminiRetry.js'
 import { sanitizeObject } from '../libs/sanitize.js'
 import { smartAICall } from '../libs/aiService.js';
 import ActividadPendientes from "../models/actividades.model.js";
-import HistorialBot from "../models/historialBot.model.js";
+import HistorialBot from "../models/historialBot.mode.js";
 
 const urlApi = 'https://wlserver-production.up.railway.app/api';
 
