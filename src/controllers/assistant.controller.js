@@ -658,7 +658,8 @@ export async function getActividadesConRevisiones(req, res) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
 
-    const odooUserId = user.id || user._id || email;
+    const { sessionUserId } = req.cookies;
+    const odooUserId = sessionUserId
 
     // ✅ Guardar mensaje del usuario en historial
     await guardarMensajeHistorial(odooUserId, sessionId, "usuario", question);
@@ -1375,7 +1376,7 @@ export async function devuelveActividades(req, res) {
     const { email } = sanitizeObject(req.body);
 
     // Obtener el ID del usuario desde el token (viene del middleware de auth)
-    const sessionUserId = req.user?.id || req.user?._id;
+    const { sessionUserId } = req.cookies;
 
     const usersData = await getAllUsers();
     const user = usersData.items.find(
@@ -1488,7 +1489,8 @@ export async function devuelveActReviciones(req, res) {
       (u) => u.email.toLowerCase() === email.toLowerCase()
     );
 
-    const odooUserId = user?.id || user?._id || email;
+    const { sessionUserId } = req.cookies;
+    const odooUserId = sessionUserId
     const sessionId = reqSessionId || `rev_${email}_${Date.now()}`.replace(/[^a-zA-Z0-9_]/g, '_');
 
     // ✅ Guardar consulta del usuario en historial
@@ -1588,7 +1590,10 @@ export async function devuelveActReviciones(req, res) {
 export async function guardarPendientes(req, res) {
   try {
     // Acepta tanto userId como odooUserId para compatibilidad
-    const { userId, odooUserId, activityId, pendientes, sessionId: reqSessionId } = req.body;
+    const { userId, activityId, pendientes, sessionId: reqSessionId } = req.body;
+
+    const { sessionUserId } = req.cookies;
+    const odooUserId = sessionUserId
 
     // Usar odooUserId si existe, sino usar userId
     const finalUserId = odooUserId || userId;
@@ -1641,7 +1646,11 @@ export async function guardarPendientes(req, res) {
  */
 export async function obtenerHistorialSesion(req, res) {
   try {
-    const { odooUserId, sessionId } = sanitizeObject(req.query);
+    const { sessionId } = sanitizeObject(req.query);
+
+    const { sessionUserId } = req.cookies;
+    const odooUserId = sessionUserId
+
 
     if (!odooUserId || !sessionId) {
       return res.status(400).json({
@@ -1678,7 +1687,11 @@ export async function obtenerHistorialSesion(req, res) {
  */
 export async function obtenerHistorialesUsuario(req, res) {
   try {
-    const { odooUserId, limit = 10, skip = 0 } = sanitizeObject(req.query);
+    const { limit = 10, skip = 0 } = sanitizeObject(req.query);
+
+    const { sessionUserId } = req.cookies;
+    const odooUserId = sessionUserId
+
 
     if (!odooUserId) {
       return res.status(400).json({
@@ -1719,7 +1732,11 @@ export async function obtenerHistorialesUsuario(req, res) {
  */
 export async function eliminarHistorialSesion(req, res) {
   try {
-    const { odooUserId, sessionId } = sanitizeObject(req.body);
+    const { sessionId } = sanitizeObject(req.body);
+
+    const { sessionUserId } = req.cookies;
+    const odooUserId = sessionUserId
+
 
     if (!odooUserId || !sessionId) {
       return res.status(400).json({
