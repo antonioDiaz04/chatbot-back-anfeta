@@ -1,4 +1,6 @@
 import axios from 'axios';
+import jwt from "jsonwebtoken";
+import { TOKEN_SECRET } from "../config.js";
 import { getAllUsers } from './users.controller.js';
 import { isGeminiQuotaError } from '../libs/geminiRetry.js'
 import { sanitizeObject } from '../libs/sanitize.js'
@@ -34,7 +36,7 @@ async function guardarMensajeHistorial(odooUserId, sessionId, role, contenido) {
     }
 
     const registro = await HistorialBot.findOneAndUpdate(
-      { odooUserId, sessionId },
+      {   userId: odooUserId, sessionId },
       {
         $push: { mensajes: { role, contenido, timestamp: new Date() } },
         $setOnInsert: { odooUserId, sessionId }
@@ -63,6 +65,8 @@ export async function chatInteractivo(req, res) {
         message: "Email y mensaje son requeridos"
       });
     }
+
+
 
     // Obtener usuario para el historial
     const usersData = await getAllUsers();
@@ -658,8 +662,10 @@ export async function getActividadesConRevisiones(req, res) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
 
-    const { sessionUserId } = req.cookies;
-    const odooUserId = sessionUserId
+
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const odooUserId = decoded.id;
 
     // ✅ Guardar mensaje del usuario en historial
     await guardarMensajeHistorial(odooUserId, sessionId, "usuario", question);
@@ -1375,8 +1381,12 @@ export async function devuelveActividades(req, res) {
   try {
     const { email } = sanitizeObject(req.body);
 
+
     // Obtener el ID del usuario desde el token (viene del middleware de auth)
-    const { sessionUserId } = req.cookies;
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const odooUserId = decoded.id;
+    const sessionUserId = odooUserId
 
     const usersData = await getAllUsers();
     const user = usersData.items.find(
@@ -1489,8 +1499,9 @@ export async function devuelveActReviciones(req, res) {
       (u) => u.email.toLowerCase() === email.toLowerCase()
     );
 
-    const { sessionUserId } = req.cookies;
-    const odooUserId = sessionUserId
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const odooUserId = decoded.id;
     const sessionId = reqSessionId || `rev_${email}_${Date.now()}`.replace(/[^a-zA-Z0-9_]/g, '_');
 
     // ✅ Guardar consulta del usuario en historial
@@ -1592,8 +1603,9 @@ export async function guardarPendientes(req, res) {
     // Acepta tanto userId como odooUserId para compatibilidad
     const { userId, activityId, pendientes, sessionId: reqSessionId } = req.body;
 
-    const { sessionUserId } = req.cookies;
-    const odooUserId = sessionUserId
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET); const odooUserId = decoded.id;
+
 
     // Usar odooUserId si existe, sino usar userId
     const finalUserId = odooUserId || userId;
@@ -1648,8 +1660,9 @@ export async function obtenerHistorialSesion(req, res) {
   try {
     const { sessionId } = sanitizeObject(req.query);
 
-    const { sessionUserId } = req.cookies;
-    const odooUserId = sessionUserId
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET); const odooUserId = decoded.id;
+
 
 
     if (!odooUserId || !sessionId) {
@@ -1689,8 +1702,10 @@ export async function obtenerHistorialesUsuario(req, res) {
   try {
     const { limit = 10, skip = 0 } = sanitizeObject(req.query);
 
-    const { sessionUserId } = req.cookies;
-    const odooUserId = sessionUserId
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const odooUserId = decoded.id;
+
 
 
     if (!odooUserId) {
@@ -1734,8 +1749,12 @@ export async function eliminarHistorialSesion(req, res) {
   try {
     const { sessionId } = sanitizeObject(req.body);
 
-    const { sessionUserId } = req.cookies;
-    const odooUserId = sessionUserId
+
+
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const odooUserId = decoded.id;
+
 
 
     if (!odooUserId || !sessionId) {
