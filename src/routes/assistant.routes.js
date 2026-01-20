@@ -4,13 +4,14 @@ const router = Router();
 import {
   devuelveActividades,
   getActividadesConRevisiones,
-  devuelveActReviciones, guardarPendientes
+  devuelveActReviciones,
+  guardarPendientes
 } from '../controllers/assistant.controller.js';
 
 import {
   obtenerHistorialSesion,
   obtenerHistorialesUsuario,
-  eliminarHistorialSesion
+  eliminarHistorialSesion,
 } from '../controllers/assistant.controller.js';
 
 
