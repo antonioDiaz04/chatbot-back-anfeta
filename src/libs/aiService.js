@@ -12,6 +12,7 @@ const genAI = new GoogleGenAI({
 
 const clavesValidas = [GROQ_API_KEY_1, GROQ_API_KEY_2].filter(key => key && key.trim() !== "");
 
+
 // Crear el pool solo con las que sí existen
 const poolGroq = clavesValidas.map(key => new Groq({ apiKey: key }));
 let indiceActual = 0;
@@ -52,15 +53,16 @@ async function llamarGroqConRespaldo(prompt) {
 export async function smartAICall(prompt, retries = 1) {
     try {
 
-        // const geminiResponse = await callGeminiWithRetry(() =>
+
         const geminiResponse = await callGeminiWithRetry(() => genAI.models.generateContent({
+            // model: 'gemini-2.0-flash',
             model: 'gemini-2.5-flash-lite',
             contents: prompt,
         }));
         return { text: geminiResponse.text, provider: 'Gemini' };
 
     } catch (error) {
-        console.error(` Error en Gemini: ${error.message || error}`);
+        console.error(`Gemini: ${error.message}`);
         const isQuota = isGeminiQuotaError(error);
 
         if (isQuota || retries <= 0) {

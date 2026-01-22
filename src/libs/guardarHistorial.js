@@ -1,4 +1,4 @@
-import HistorialBot from "../models/historialBot.mode";
+import HistorialBot from "../models/historialBot.mode.js";
 
 /**
  * Guarda un mensaje en el historial del bot.
@@ -8,19 +8,25 @@ import HistorialBot from "../models/historialBot.mode";
  * @param {String} contenido - Contenido del mensaje
  * @returns {Promise<Object>} - El documento actualizado
  */
-export async function guardarMensajeHistorial(userId, sessionId, role, contenido) {
-  if (!userId || !sessionId || !role || !contenido) {
-    throw new Error("Faltan datos requeridos para guardar el mensaje");
+export async function guardarMensajeHistorial(odooUserId, sessionId, role, contenido) {
+  try {
+    if (!odooUserId || !sessionId || !role || !contenido) {
+      throw new Error("Faltan datos requeridos para guardar el mensaje");
+    }
+
+    // Guardar el mensaje en MongoDB
+    const registro = await HistorialBot.findOneAndUpdate(
+      { userId: odooUserId, sessionId },
+      {
+        $push: { mensajes: { role, contenido, timestamp: new Date() } },
+        $setOnInsert: { odooUserId, sessionId }
+      },
+      { new: true, upsert: true } // crea el documento si no existe
+    );
+
+    return registro;
+  } catch (error) {
+    console.error("Error guardando mensaje en historial:", error.message);
+    return null;
   }
-
-  // Guardar el mensaje en MongoDB
-  const registro = await HistorialBot.findOneAndUpdate(
-    { userId, sessionId },
-    { 
-      $push: { mensajes: { role, contenido, timestamp: new Date() } } 
-    },
-    { new: true, upsert: true } // crea el documento si no existe
-  );
-
-  return registro;
 }

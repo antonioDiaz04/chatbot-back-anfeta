@@ -1,7 +1,11 @@
 import mongoose from "mongoose";
 
 const PendienteSchema = new mongoose.Schema({
-    pendientId: {
+    pendienteId: {
+        type: String,
+        required: true,
+    },
+    nombre: {
         type: String,
         required: true
     },
@@ -15,32 +19,60 @@ const PendienteSchema = new mongoose.Schema({
         default: "pendiente"
     }
 });
+const ActividadesSchema = new mongoose.Schema({
+    ActividadId: {
+        type: String,
+        required: true,
+    },
+    pendientes: {
+        type: [PendienteSchema],
+        default: []
+    },
+    estado: {
+        type: String,
+        default: "En proceso"
+    },
+    duracionMin: {
+        type: Number,
+        default: 0
+    },
+    prioridad: {
+        type: String,
+        enum: ["ALTA", "MEDIA", "BAJA"],
+        default: "BAJA"
+    },
+    fechaCreacion: {
+        type: Date,
+        default: Date.now
+    }
+});
 
-const ActividadPendientesSchema = new mongoose.Schema(
+const ProyectosSchema = new mongoose.Schema(
     {
         userId: {
             type: mongoose.Schema.Types.ObjectId,
             ref: "User",
-            required: true
+            required: true,
+            unique: true
         },
-        activityId: {
-            type: String,
-            required: true
-        },
-        pendientes: {
-            type: [PendienteSchema],
+        actividades: {
+            type: [ActividadesSchema],
             default: []
+        },
+        nombre: {
+            type: String,
+            required: true,
+            unique: true
         }
     },
     { timestamps: true }
 );
 
-ActividadPendientesSchema.index(
-    { userId: 1, activityId: 1 },
-    { unique: true }
-);
+ProyectosSchema.index({ userId: 1 });
+ProyectosSchema.index({ userId: 1, nombre: 1 }, { unique: true });
+
 
 export default mongoose.model(
-    "ActividadPendientes",
-    ActividadPendientesSchema
+    "ProyectosSchema",
+    ProyectosSchema
 );

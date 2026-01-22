@@ -1,5 +1,69 @@
 import mongoose from "mongoose";
 
+
+const TareaPendienteSchema = new mongoose.Schema({
+    id: String,
+    nombre: String,
+    terminada: Boolean,
+    confirmada: Boolean,
+    duracionMin: Number,
+    fechaCreacion: String,
+    fechaFinTerminada: String,
+    prioridad: String,
+    diasPendiente: Number
+})
+
+const RevisionActividadSchema = new mongoose.Schema({
+    actividadId: String,
+    actividadTitulo: String,
+    totalPendientes: Number,
+    pendientesAlta: Number,
+    tiempoTotal: Number,
+    pendientes: [TareaPendienteSchema],
+    tareasConTiempo: [TareaPendienteSchema],
+    tareasSinTiempo: [TareaPendienteSchema],
+    totalTareas: Number,
+    tareasAltaPrioridad: Number
+});
+
+const ActividadSchema = new mongoose.Schema({
+    id: String,
+    titulo: String,
+    horario: String,
+    status: String,
+    proyecto: String,
+    tieneRevisiones: Boolean,
+    esPrincipal: Boolean
+}, { _id: false });
+
+const MetricsSchema = new mongoose.Schema({
+    totalActividades: Number,
+    totalPendientes: Number,
+    pendientesAltaPrioridad: Number,
+    tiempoEstimadoTotal: String,
+    actividadesConPendientes: Number,
+    tareasConTiempo: Number,
+    tareasSinTiempo: Number,
+    tareasAltaPrioridad: Number
+}, { _id: false });
+
+const AnalysisDataSchema = new mongoose.Schema({
+    actividades: [ActividadSchema],
+    revisionesPorActividad: [RevisionActividadSchema]
+}, { _id: false });
+
+const AnalisisCompletoSchema = new mongoose.Schema({
+    success: Boolean,
+    answer: String,
+    provider: String,
+    sessionId: String,
+    proyectoPrincipal: String,
+    metrics: MetricsSchema,
+    data: AnalysisDataSchema,
+    separadasPorTiempo: Boolean,
+    sugerencias: [String]
+}, { _id: false });
+
 const MensajeSchema = new mongoose.Schema({
     role: {
         type: String,
@@ -13,14 +77,22 @@ const MensajeSchema = new mongoose.Schema({
     timestamp: {
         type: Date,
         default: Date.now
+    },
+    analisis: {
+        type: AnalisisCompletoSchema,
+        default: null
+    },
+    tipoMensaje: {
+        type: String,
+        enum: ["texto", "analisis_inicial", "respuesta_ia", "error", "sistema"],
+        default: "texto"
     }
 });
 
 const HistorialSchema = new mongoose.Schema(
     {
         userId: {
-            type: mongoose.Schema.Types.ObjectId,
-            ref: "User",
+            type: String,
             required: true
         },
         sessionId: {
@@ -30,9 +102,33 @@ const HistorialSchema = new mongoose.Schema(
         mensajes: {
             type: [MensajeSchema],
             default: []
+        },
+        ultimoAnalisis: {
+            type: AnalisisCompletoSchema,
+            default: null
+        },
+        estadoAnterior: {
+            type: String,
+            default: null
+        },
+        estadoConversacion: {
+            type: String,
+            enum: [
+                "inicio",
+                "esperando_usuario",
+                "esperando_bot",
+                "mostrando_actividades",
+                "esperando_descripcion_pendientes",
+                "esperando_confirmacion_pendientes",
+                "motivo_pendiente_resagado",
+                "finalizado"
+            ],
+            default: "inicio"
         }
     },
     { timestamps: true }
 );
+
+HistorialSchema.index({ userId: 1, sessionId: 1 }, { unique: true });
 
 export default mongoose.model("HistorialBot", HistorialSchema);
