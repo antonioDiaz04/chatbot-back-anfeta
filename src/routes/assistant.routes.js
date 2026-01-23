@@ -5,7 +5,8 @@ import {
   devuelveActividades,
   getActividadesConRevisiones,
   devuelveActReviciones,
-  guardarPendientes
+  guardarPendientes,
+  confirmarEstadoPendientes
 } from '../controllers/assistant.controller.js';
 
 import {
@@ -13,7 +14,6 @@ import {
   obtenerHistorialSesion,
   obtenerHistorialesUsuario,
   eliminarHistorialSesion,
-
 } from '../controllers/assistant.controller.js';
 
 
@@ -27,6 +27,7 @@ router.post('/actividades-con-revisiones', getActividadesConRevisiones);
 router.post('/actividades-local', getActividadesLocal);
 router.post('/revisiones', devuelveActReviciones);
 router.post('/guardarPendientes', guardarPendientes);
+router.post('/confirmarEstadoPendientes', confirmarEstadoPendientes);
 
 // Rutas de historial
 router.delete('/historial/sesion', eliminarHistorialSesion);

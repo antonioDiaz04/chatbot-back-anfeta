@@ -12,6 +12,7 @@ import { connectDB } from "./src/database/db.js";
 // Importar rutas
 import assistantRoutes from "./src/routes/assistant.routes.js";
 import authRoutes from "./src/routes/auth.routes.js";
+import reportesRoutes from "./src/routes/reportes.routes.js";
 
 
 
@@ -61,6 +62,7 @@ app.use((req, res, next) => {
 //Rutas
 app.use(`/api/${API_VERSION}/assistant`, assistantRoutes);
 app.use(`/api/${API_VERSION}/auth`, authRoutes);
+app.use(`/api/${API_VERSION}/reportes`, reportesRoutes);
 
 
 
