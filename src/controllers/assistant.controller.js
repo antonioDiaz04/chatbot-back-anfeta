@@ -23,7 +23,7 @@ export async function getActividadesConRevisiones(req, res) {
         message: "El email es requerido"
       });
     }
-    const sessionId = `act_${email}_${Date.now()}`.replace(/[^a-zA-Z0-9_]/g, '_');
+  
 
     const usersData = await getAllUsers();
     const user = usersData.items.find(
@@ -34,8 +34,11 @@ export async function getActividadesConRevisiones(req, res) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
 
+    
     const { sessionUserId } = req.cookies;
     const odooUserId = sessionUserId;
+
+    const sessionId = generarSessionIdDiario(odooUserId);
 
     // ✅ Guardar mensaje del usuario en historial
     await guardarMensajeHistorial(odooUserId, sessionId, "usuario", question);
