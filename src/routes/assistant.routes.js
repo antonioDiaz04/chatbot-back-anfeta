@@ -9,6 +9,7 @@ import {
 } from '../controllers/assistant.controller.js';
 
 import {
+  getActividadesLocal,
   obtenerHistorialSesion,
   obtenerHistorialesUsuario,
   eliminarHistorialSesion,
@@ -23,6 +24,7 @@ router.get('/historial/usuario', obtenerHistorialesUsuario);
 // Rutas de actividades/pendientes
 router.post('/actividades', devuelveActividades);
 router.post('/actividades-con-revisiones', getActividadesConRevisiones);
+router.post('/actividades-local', getActividadesLocal);
 router.post('/revisiones', devuelveActReviciones);
 router.post('/guardarPendientes', guardarPendientes);
 
