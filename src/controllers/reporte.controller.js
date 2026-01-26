@@ -17,7 +17,7 @@ export async function generarReporteDiario(req, res) {
         });
 
         // Obtener TODOS los proyectos
-        const proyectos = await ProyectosSchema.find({});
+        const proyectos = await ActividadesSchema.find({});
 
         const reportes = [];
 

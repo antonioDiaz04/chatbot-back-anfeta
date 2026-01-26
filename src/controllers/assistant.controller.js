@@ -1151,60 +1151,65 @@ ${totalTareasSinTiempo} tareas sin tiempo.
 
 export async function validarExplicacion(req, res) {
   try {
-
     const { taskName, explanation, activityTitle } = sanitizeObject(req.body);
-
     const cleanTitle = activityTitle.replace(/,/g, ' ');
 
-    console.log("taskName", taskName);
-    console.log("explanation", explanation);
-    console.log("activityTitle", activityTitle);
-
-const prompt = `
-Eres un validador de tareas para un equipo de desarrollo.
-Analiza si la explicación del usuario tiene sentido con la tarea.
+    const prompt = `
+Eres un Analista de Productividad Técnico. Tu misión es evaluar si la explicación de un desarrollador sobre una tarea pendiente es válida o es una evasión.
 
 CONTEXTO:
-- Actividad: "${activityTitle}"
-- Tarea: "${taskName}"
-- Explicación: "${explanation}"
+- Actividad: "${cleanTitle}"
+- Tarea Pendiente: "${taskName}"
+- Explicación del usuario: "${explanation}"
 
-REGLAS DE VALIDACIÓN:
-1. Sé flexible: Los desarrolladores a veces usan términos técnicos o mencionan procesos relacionados (DB, API, diseño).
-2. Si la explicación menciona PASOS para resolverlo, aunque no mencione la palabra exacta de la tarea, acéptala.
-3. Rechaza SOLO si la explicación es basura (ej: "asdfg"), si es demasiado corta (ej: "listo"), o si habla de algo totalmente ajeno (ej: la tarea es 'arreglar CSS' y el usuario habla de 'comprar café').
+REGLAS DE EVALUACIÓN:
+1. VALIDEZ: Es válida si hay un bloqueo real (dependencias, falta de info) o un plan técnico claro (ej. "lo haré mañana tras definir la DB").
+2. EVASIÓN: Es inválida si es vaga (ej. "luego", "al terminar", "después lo veo") sin explicar el PORQUÉ técnico o el QUÉ hará después.
 
-RESPONDE ÚNICAMENTE ESTE JSON:
+TU RESPUESTA DEBE SER ÚNICAMENTE ESTE JSON:
 {
-  "valida": true | false,
-  "razon": "Si es falsa, explica qué falta. Si es verdadera, pon 'OK'"
+  "valida": boolean,
+  "categoriaMotivo": "AVANCE_CONCRETO" | "EVASION_O_VAGO" | "BLOQUEO_TECNICO",
+  "razon": "Frase corta (máx 15 palabras) explicando el veredicto.",
+  "pista": "Pregunta de 10 palabras para que el usuario mejore su respuesta (vacío si valida es true)."
 }
 `;
 
-
     const aiResult = await smartAICall(prompt);
-
-    const text = aiResult.text;
-    console.log("text", text);
+    const text = aiResult?.text;
 
     if (!text) {
-      return res.json({ valida: false, razon: "La IA no devolvió texto" });
+      return res.status(500).json({ valida: false, razon: "La IA no respondió." });
     }
 
-    // formatear la respuesta
+    // Extracción robusta del JSON
     const jsonMatch = text.match(/\{[\s\S]*\}/);
     if (!jsonMatch) {
-      return res.json({ valida: false, razon: "Formato de respuesta IA inválido" });
+      return res.status(500).json({ valida: false, razon: "Formato de IA inválido." });
     }
 
-    const resultadoFinal = JSON.parse(jsonMatch[0]);
-    return res.json(resultadoFinal);
+    const resultadoIA = JSON.parse(jsonMatch[0]);
+
+    // Estructura de respuesta final (reutilizable para la misma ruta)
+    const respuesta = {
+      valida: !!resultadoIA.valida,
+      categoriaMotivo: resultadoIA.categoriaMotivo || "INSUFICIENTE",
+      razon: resultadoIA.razon || "Revisión técnica necesaria.",
+      sugerencia: resultadoIA.pista || (resultadoIA.valida ? "" : "Proporciona más detalles técnicos.")
+    };
+
+    // Log para monitoreo interno
+    if (!respuesta.valida) {
+      console.log(`[Validación Fallida] Tarea: ${taskName} | Motivo: ${respuesta.categoriaMotivo}`);
+    }
+
+    return res.json(respuesta);
 
   } catch (error) {
-    console.error("Error validando explicación con IA:", error);
-    return res.json({
+    console.error("Error en validarExplicacion:", error);
+    return res.status(500).json({
       valida: false,
-      razon: "Error al validar con IA"
+      razon: "Error interno al procesar la validación."
     });
   }
 }
