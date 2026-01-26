@@ -8,17 +8,16 @@ import { textoColorido } from "./src/utils/colorText.js";
 import { CORS_ORIGINS, API_VERSION, PORT } from "./src/config.js";
 import { connectDB } from "./src/database/db.js";
 
-
 // Importar rutas
 import assistantRoutes from "./src/routes/assistant.routes.js";
 import authRoutes from "./src/routes/auth.routes.js";
 import reportesRoutes from "./src/routes/reportes.routes.js";
 
-
+// Variables
+const modoProduction = process.env.NODE_ENV === "production";
 
 const app = express();
 
-// Conectar a MongoDB al inicio
 connectDB();
 
 // CORS
@@ -35,7 +34,7 @@ app.use(express.urlencoded({ extended: true }));
 app.use(helmet());
 app.use(cookieParser());
 
-// Solo en desarrollo
+// Solo si esta en modo desarrollo imprimir las consultas con morgan
 if (process.env.NODE_ENV !== "production") {
   app.use(morgan("dev"));
 }
@@ -59,18 +58,14 @@ app.use((req, res, next) => {
   next();
 });
 
-//Rutas
+// Rutas
 app.use(`/api/${API_VERSION}/assistant`, assistantRoutes);
 app.use(`/api/${API_VERSION}/auth`, authRoutes);
 app.use(`/api/${API_VERSION}/reportes`, reportesRoutes);
 
-
-
-const modoProduction = process.env.NODE_ENV === "production";
 app.listen(PORT, () => {
   textoColorido(
     [`Servidor corriendo en el puerto: ${PORT} 🖥`],
-    // [` Servidor corriendo en el puerto: ${PORT} `],
     ["rgb(33, 97, 235)", "rgb(46, 15, 183)"],
     modoProduction
   );

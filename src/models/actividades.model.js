@@ -13,6 +13,15 @@ const PendienteSchema = new mongoose.Schema({
         type: String,
         required: true
     },
+    duracionMin: {
+        type: Number,
+        default: 0,
+        required: true
+    },
+    prioridad: {
+        type: String,
+        default: "BAJA"
+    },
     estado: {
         type: String,
         enum: ["pendiente", "completado", "cancelado"],

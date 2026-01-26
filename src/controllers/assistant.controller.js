@@ -23,7 +23,6 @@ export async function getActividadesConRevisiones(req, res) {
         message: "El email es requerido"
       });
     }
-  
 
     const usersData = await getAllUsers();
     const user = usersData.items.find(
@@ -34,9 +33,9 @@ export async function getActividadesConRevisiones(req, res) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
 
-    
-    const { sessionUserId } = req.cookies;
-    const odooUserId = sessionUserId;
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const odooUserId = decoded.id;;
 
     const sessionId = generarSessionIdDiario(odooUserId);
 
@@ -97,7 +96,7 @@ export async function getActividadesConRevisiones(req, res) {
       const tiene00ftf = actividad.titulo.toLowerCase().includes('00ftf');
       // Excluir actividades con status "00sec"
       const es00sec = actividad.status === "00sec";
-      
+
       return !tiene00ftf && !es00sec;
     });
 
@@ -149,7 +148,7 @@ export async function getActividadesConRevisiones(req, res) {
                 pendienteInfo.prioridad = p.duracionMin > 60 ? "ALTA" :
                   p.duracionMin > 30 ? "MEDIA" : "BAJA";
                 revisionesPorActividad[actividad.id].pendientesConTiempo.push(pendienteInfo);
-                
+
                 // Marcar que esta actividad tiene al menos una revisión CON TIEMPO
                 actividadesConRevisionesConTiempoIds.add(actividad.id);
               } else {
@@ -170,21 +169,21 @@ export async function getActividadesConRevisiones(req, res) {
       // Verificar si tiene revisiones CON TIEMPO
       const tieneRevisionesConTiempo = actividadesConRevisionesConTiempoIds.has(actividad.id);
       if (!tieneRevisionesConTiempo) return false;
-      
+
       // Verificar si está en horario laboral (09:00-17:30)
       const horaInicio = parseInt(actividad.horaInicio.split(':')[0]);
       const estaEnHorarioLaboral = horaInicio >= 9 && horaInicio <= 17;
-      
+
       return estaEnHorarioLaboral;
     });
 
     // Si no hay actividades que cumplan todos los criterios
     if (actividadesFinales.length === 0) {
       // Verificar qué criterios no se cumplen
-      const actividadesConTiempo = actividadesFiltradas.filter(a => 
+      const actividadesConTiempo = actividadesFiltradas.filter(a =>
         actividadesConRevisionesConTiempoIds.has(a.id)
       );
-      
+
       const actividadesHorarioLaboral = actividadesFiltradas.filter(a => {
         const horaInicio = parseInt(a.horaInicio.split(':')[0]);
         return horaInicio >= 9 && horaInicio <= 17;
@@ -341,7 +340,7 @@ EJEMPLO DE RESPUESTA:
         .map(actividad => {
           const revisiones = revisionesPorActividad[actividad.id];
           if (!revisiones || revisiones.pendientesConTiempo.length === 0) return null;
-          
+
           return {
             actividadId: actividad.id,
             actividadTitulo: actividad.titulo,
@@ -1145,6 +1144,161 @@ ${totalTareasSinTiempo} tareas sin tiempo.
     return res.status(500).json({
       success: false,
       message: "Error en función local",
+      error: error.message
+    });
+  }
+}
+
+export async function validarExplicacion(req, res) {
+  try {
+
+    const { taskName, explanation, activityTitle } = sanitizeObject(req.body);
+
+    const cleanTitle = activityTitle.replace(/,/g, ' ');
+
+    console.log("taskName", taskName);
+    console.log("explanation", explanation);
+    console.log("activityTitle", activityTitle);
+
+const prompt = `
+Eres un validador de tareas para un equipo de desarrollo.
+Analiza si la explicación del usuario tiene sentido con la tarea.
+
+CONTEXTO:
+- Actividad: "${activityTitle}"
+- Tarea: "${taskName}"
+- Explicación: "${explanation}"
+
+REGLAS DE VALIDACIÓN:
+1. Sé flexible: Los desarrolladores a veces usan términos técnicos o mencionan procesos relacionados (DB, API, diseño).
+2. Si la explicación menciona PASOS para resolverlo, aunque no mencione la palabra exacta de la tarea, acéptala.
+3. Rechaza SOLO si la explicación es basura (ej: "asdfg"), si es demasiado corta (ej: "listo"), o si habla de algo totalmente ajeno (ej: la tarea es 'arreglar CSS' y el usuario habla de 'comprar café').
+
+RESPONDE ÚNICAMENTE ESTE JSON:
+{
+  "valida": true | false,
+  "razon": "Si es falsa, explica qué falta. Si es verdadera, pon 'OK'"
+}
+`;
+
+
+    const aiResult = await smartAICall(prompt);
+
+    const text = aiResult.text;
+    console.log("text", text);
+
+    if (!text) {
+      return res.json({ valida: false, razon: "La IA no devolvió texto" });
+    }
+
+    // formatear la respuesta
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      return res.json({ valida: false, razon: "Formato de respuesta IA inválido" });
+    }
+
+    const resultadoFinal = JSON.parse(jsonMatch[0]);
+    return res.json(resultadoFinal);
+
+  } catch (error) {
+    console.error("Error validando explicación con IA:", error);
+    return res.json({
+      valida: false,
+      razon: "Error al validar con IA"
+    });
+  }
+}
+
+export async function guardarExplicaciones(req, res) {
+  try {
+    const { explanations } = sanitizeObject(req.body);
+
+    console.log(explanations);
+
+    const { token } = req.cookies;
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: "Token requerido"
+      });
+    }
+
+    const { id: userId } = jwt.verify(token, TOKEN_SECRET);
+
+    if (!Array.isArray(explanations) || explanations.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No hay explicaciones para guardar"
+      });
+    }
+
+    let totalGuardadas = 0;
+
+    for (const exp of explanations) {
+      const {
+        taskId,
+        taskName,
+        explanation,
+        confirmed,
+        activityTitle,
+        duration,
+        priority
+      } = exp;
+
+      if (!taskId || !taskName || !explanation || !activityTitle) continue;
+
+      // Busca la actividad
+      let actividad = await ActividadesSchema.findOne({
+        userId,
+        nombre: activityTitle
+      });
+
+      if (!actividad) {
+        actividad = await ActividadesSchema.create({
+          userId,
+          nombre: activityTitle,
+          pendientes: []
+        });
+      }
+
+      // Verifica si ya existe el pendiente
+      const pendienteExistente = actividad.pendientes.find(
+        p => p.pendienteId === taskId
+      );
+
+      if (pendienteExistente) {
+        // Actualiza si ya existe
+        pendienteExistente.descripcion = explanation;
+        pendienteExistente.estado = confirmed ? "completado" : "pendiente";
+        pendienteExistente.duracionMin = duration ?? pendienteExistente.duracionMin;
+        pendienteExistente.prioridad = priority ?? pendienteExistente.prioridad;
+      } else {
+        // Crea un nuevo pendiente
+        actividad.pendientes.push({
+          pendienteId: taskId,
+          nombre: taskName,
+          descripcion: explanation,
+          estado: confirmed ? "completado" : "pendiente",
+          duracionMin: duration ?? 0,
+          prioridad: priority ?? "BAJA"
+        });
+      }
+
+      await actividad.save();
+      totalGuardadas++;
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Pendientes guardados correctamente",
+      totalGuardadas
+    });
+
+  } catch (error) {
+    console.error("Error en guardarExplicaciones:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error interno al guardar explicaciones",
       error: error.message
     });
   }

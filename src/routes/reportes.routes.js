@@ -5,6 +5,4 @@ const router = Router();
 
 router.post("/reporte-diario", generarReporteDiario);
 
-
-
 export default router;
