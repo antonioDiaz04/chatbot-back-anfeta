@@ -34,7 +34,7 @@ export async function getActividadesConRevisiones(req, res) {
 
     const { token } = req.cookies;
     const decoded = jwt.verify(token, TOKEN_SECRET);
-    const odooUserId = decoded.id;;
+    const odooUserId = decoded.id;
 
     const sessionId = generarSessionIdDiario(odooUserId);
 
@@ -666,21 +666,19 @@ export async function devuelveActReviciones(req, res) {
 
 export async function guardarExplicaciones(req, res) {
   try {
-    const { explanations, sessionId } = req.body;
+    const { explanations, sessionId } = sanitizeObject(req.body);
     const { token } = req.cookies;
-
-    // Verificamos el token para obtener el ID de Odoo
-    const decoded = jwt.verify(token, TOKEN_SECRET);
-    const odooUserId = decoded.id; 
 
     if (!Array.isArray(explanations)) {
       return res.status(400).json({ error: "No se recibieron explicaciones válidas" });
     }
 
-    // 1. Buscamos el documento raíz del usuario
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const odooUserId = decoded.id;
+
+    // 1. Documento raíz del usuario
     let registroUsuario = await ActividadesSchema.findOne({ odooUserId });
 
-    // Si no existe, lo creamos (odooUserId es requerido)
     if (!registroUsuario) {
       registroUsuario = await ActividadesSchema.create({
         odooUserId,
@@ -688,28 +686,26 @@ export async function guardarExplicaciones(req, res) {
       });
     }
 
-    // 2. Procesamos cada explicación
+    // 2. Procesar explicaciones
     for (const exp of explanations) {
-      // Buscamos si la actividad ya existe en el array del usuario
+
+      // Buscar / crear actividad
       let actividad = registroUsuario.actividades.find(
-        (a) => a.titulo === exp.activityTitle
+        a => a.titulo === exp.activityTitle
       );
 
-      // Si la actividad no existe, la agregamos al array
       if (!actividad) {
-
-        console.log("Actividad no encontrada, creando...");
         registroUsuario.actividades.push({
           actividadId: `ACT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
           titulo: exp.activityTitle,
-          fecha: new Date().toISOString().split('T')[0],
+          fecha: new Date().toISOString().split("T")[0],
           pendientes: []
         });
-        // Referenciamos la actividad recién creada
-        actividad = registroUsuario.actividades[registroUsuario.actividades.length - 1];
+
+        actividad = registroUsuario.actividades.at(-1);
       }
 
-      // 3. Buscamos si el pendiente ya existe dentro de esa actividad
+      // 3. Buscar pendiente (USANDO id)
       const pendienteIndex = actividad.pendientes.findIndex(
         (p) => p.pendienteId === exp.taskId
       );
@@ -717,43 +713,89 @@ export async function guardarExplicaciones(req, res) {
       const datosPendiente = {
         pendienteId: exp.taskId,
         nombre: exp.taskName,
-        descripcion: exp.explanation || '', // <--- ¡Ahora sí se guarda!
-        terminada: exp.confirmed || false,
-        confirmada: exp.confirmed || false,
+
+        // 🔑 SOLO la última descripción válida
+        descripcion: exp.explanation,
+
+        terminada: !!exp.confirmed,
+        confirmada: !!exp.confirmed,
+
         duracionMin: exp.duration || 0,
-        fechaCreacion: new Date()
+
+        // 🔑 fecha de última actualización
+        updatedAt: new Date()
       };
 
+
       if (pendienteIndex !== -1) {
-        // Actualizamos el pendiente existente (mezclando datos)
-        actividad.pendientes[pendienteIndex] = {
-          ...actividad.pendientes[pendienteIndex].toObject(),
-          ...datosPendiente
-        };
+        // ✅ EXISTE → SOLO ACTUALIZA
+        actividad.pendientes[pendienteIndex].descripcion = exp.explanation;
+        actividad.pendientes[pendienteIndex].terminada = !!exp.confirmed;
+        actividad.pendientes[pendienteIndex].confirmada = !!exp.confirmed;
+        actividad.pendientes[pendienteIndex].duracionMin = exp.duration || 0;
+        actividad.pendientes[pendienteIndex].updatedAt = new Date();
       } else {
-        // Agregamos el nuevo pendiente si no existía
-        actividad.pendientes.push(datosPendiente);
+        // ❌ NO EXISTE → SE CREA UNA SOLA VEZ
+        actividad.pendientes.push({
+          ...datosPendiente,
+          createdAt: new Date()
+        });
       }
+
     }
 
-    // 4. Guardamos los cambios en la base de datos
     registroUsuario.ultimaSincronizacion = new Date();
-    
-    // Al usar .save() en el documento raíz, Mongoose valida todo el árbol
     await registroUsuario.save();
 
-    return res.status(200).json({ 
-      success: true, 
+    // 4. Historial del bot
+    const historial = await HistorialBot.findOne({ sessionId });
+
+    if (historial) {
+      explanations.forEach(exp => {
+        const estadoIndex = historial.tareasEstado.findIndex(
+          t => t.taskId === exp.taskId
+        );
+
+        const nuevoEstado = {
+          taskId: exp.taskId,
+          taskName: exp.taskName,
+          actividadTitulo: exp.activityTitle,
+          explicada: true,
+          validada: exp.confirmed || false,
+          explicacion: exp.explanation, // ✅ TAMBIÉN AQUÍ
+          ultimoIntento: new Date()
+        };
+
+        if (estadoIndex !== -1) {
+          historial.tareasEstado.set(estadoIndex, nuevoEstado);
+        } else {
+          historial.tareasEstado.push(nuevoEstado);
+        }
+      });
+
+      historial.mensajes.push({
+        role: "bot",
+        contenido: `He guardado las descripciones de ${explanations.length} tareas correctamente.`,
+        tipoMensaje: "sistema",
+        timestamp: new Date()
+      });
+
+      historial.estadoConversacion = "finalizado";
+      await historial.save();
+    }
+
+    return res.status(200).json({
+      success: true,
       message: "Explicaciones guardadas con éxito",
       total: explanations.length,
-      sessionId 
+      sessionId
     });
 
   } catch (error) {
     console.error("Error en guardarExplicaciones:", error);
-    return res.status(500).json({ 
-      success: false, 
-      error: error.message 
+    return res.status(500).json({
+      success: false,
+      error: error.message
     });
   }
 }
@@ -820,29 +862,38 @@ export async function validarExplicacion(req, res) {
     console.log(explanation)
 
     const prompt = `
-Eres un asistente que verifica si un comentario está relacionado
-con una tarea específica o con algo necesario para poder trabajar en ella hoy.
+Eres un asistente que valida si un comentario del usuario
+está realmente relacionado con una tarea específica
+o con algo necesario para poder avanzar en ella HOY.
 
 CONTEXTO:
 - Actividad: "${cleanTitle}"
 - Tarea: "${taskName}"
 - Comentario del usuario: "${explanation}"
 
-INSTRUCCIONES:
-- Considera relacionado si el comentario:
-  - Describe acciones sobre la tarea, o
-  - Menciona algo necesario para poder avanzar en ella hoy
-    (por ejemplo: herramientas, equipo, bloqueos prácticos).
-- No evalúes calidad, detalle ni redacción.
-- Comentarios breves o informales son aceptables.
-- Solo marca como no relacionado si habla de un tema totalmente distinto
-  o no se entiende ninguna intención.
+CRITERIOS PARA CONSIDERARLO RELACIONADO:
+Marca como relacionado SOLO si el comentario:
+- Describe una acción que hará, hizo o intentó sobre la tarea, o
+- Explica algo necesario para poder avanzar hoy
+  (bloqueos reales, herramientas, accesos, información faltante).
 
-RESPONDE ÚNICAMENTE EN JSON:
+CRITERIOS PARA NO RELACIONADO:
+Marca como NO relacionado si:
+- El usuario dice explícitamente que no hará nada,
+- Habla de un tema distinto (personal, general, sin relación),
+- Es una respuesta evasiva o sin intención clara de trabajar la tarea.
+
+REGLAS IMPORTANTES:
+- NO evalúes calidad, ortografía ni nivel de detalle.
+- Comentarios breves o informales son válidos.
+- Sé estricto pero justo: duda razonable = relacionado.
+- Si NO es relacionado, explica claramente qué faltó.
+
+RESPONDE ÚNICAMENTE EN JSON CON ESTE FORMATO EXACTO:
 {
-  "esDelTema": true o false,
-  "razon": "Frase corta (máx 10 palabras)",
-  "sugerencia": "Pregunta corta para orientar al usuario (vacía si esDelTema es true)"
+  "esDelTema": true | false,
+  "razon": "Explicación breve y concreta del motivo",
+  "sugerencia": "Pregunta clara para que el usuario corrija o explique mejor (vacía si esDelTema es true)",
 }
 `;
 
@@ -904,7 +955,7 @@ export async function obtenerHistorialSesion(req, res) {
     const decoded = jwt.verify(token, TOKEN_SECRET);
     const userId = decoded.id; // Este es el OdooUserId de 32 caracteres
 
-    const sessionId = generarSessionIdDiario(userId);
+    const sessionId = generarSessionIdDiario(userId);// Genera un sessionId diario
 
     // 1️⃣ Obtener historial de la conversación (HistorialBot)
     const historial = await HistorialBot.findOne({ userId, sessionId }).lean();
@@ -958,7 +1009,7 @@ export async function obtenerHistorialSesion(req, res) {
       data: {
         ...historial,
         // Aseguramos que el 'ultimoAnalisis' también refleje los cambios si es necesario
-        ultimoAnalisis: historial.ultimoAnalisis 
+        ultimoAnalisis: historial.ultimoAnalisis
       },
       actividades: actividadesProcesadas,
       cache: {
@@ -975,6 +1026,64 @@ export async function obtenerHistorialSesion(req, res) {
 
   } catch (error) {
     console.error("❌ Error al obtener sesión:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error interno del servidor",
+      error: error.message
+    });
+  }
+}
+
+export async function obtenerTodoHistorialSesion(req, res) {
+  try {
+    const { token } = req.cookies;
+    if (!token) {
+      return res.status(401).json({ success: false, message: "No autenticado" });
+    }
+
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const userId = decoded.id;
+
+    // 1️⃣ Buscar todos los historiales asociados al usuario
+    // Ordenamos por fecha de creación (más reciente primero)
+    const historiales = await HistorialBot.find({ userId })
+      .sort({ updatedAt: -1 }) // O 'createdAt', dependiendo de tu esquema
+      .lean();
+
+    // 2️⃣ Obtener también el caché de actividades (opcional, pero útil para contexto)
+    const actividadesCache = await ActividadesSchema.findOne({
+      odooUserId: userId
+    }).lean();
+
+    // 3️⃣ Validar si existen registros
+    if (!historiales || historiales.length === 0) {
+      return res.json({
+        success: true,
+        message: "No se encontraron sesiones previas",
+        data: [],
+        cache: {
+          disponible: !!actividadesCache
+        }
+      });
+    }
+
+    // 4️⃣ Retornar el listado completo
+    return res.json({
+      success: true,
+      count: historiales.length,
+      data: historiales,
+      cache: {
+        disponible: !!actividadesCache,
+        ultimaSincronizacion: actividadesCache?.ultimaSincronizacion || null
+      },
+      meta: {
+        userId,
+        timestamp: new Date().toISOString()
+      }
+    });
+
+  } catch (error) {
+    console.error("❌ Error al obtener todo el historial de sesiones:", error);
     return res.status(500).json({
       success: false,
       message: "Error interno del servidor",

@@ -9,17 +9,14 @@ const EstadoTareaSchema = new mongoose.Schema({
         type: Boolean,
         default: false
     },
-
+    explicacion: {
+        type: String,
+        default: ''
+    },
     validada: {
         type: Boolean,
         default: false
     },
-
-    explicacion: {
-        type: String,
-        default: ""
-    },
-
     ultimoIntento: {
         type: Date,
         default: null
@@ -28,16 +25,27 @@ const EstadoTareaSchema = new mongoose.Schema({
 
 
 const TareaPendienteSchema = new mongoose.Schema({
-    id: String,
+    pendienteId: {
+        type: String,
+        default: null   // 👈 NO required
+    },
+    id: {
+        type: String,
+        default: null
+    },
     nombre: String,
+    descripcion: String,
     terminada: Boolean,
     confirmada: Boolean,
     duracionMin: Number,
-    fechaCreacion: String,
-    fechaFinTerminada: String,
+    fechaCreacion: {
+        type: Date,
+        default: Date.now
+    },
+    fechaFinTerminada: Date,
     prioridad: String,
     diasPendiente: Number
-})
+}, { _id: false });
 
 const RevisionActividadSchema = new mongoose.Schema({
     actividadId: String,

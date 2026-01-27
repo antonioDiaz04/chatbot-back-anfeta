@@ -13,7 +13,7 @@ import {
 import {
   // getActividadesLocal,
   obtenerHistorialSesion,
-  // obtenerHistorialesUsuario,
+  obtenerTodoHistorialSesion,
   // eliminarHistorialSesion,
   guardarExplicaciones
 } from '../controllers/assistant.controller.js';
@@ -21,7 +21,7 @@ import {
 
 // Rutas de historial
 router.get('/historial/sesion', obtenerHistorialSesion);
-// router.get('/historial/usuario', obtenerHistorialesUsuario);
+router.get('/historial/usuario', obtenerTodoHistorialSesion);
 
 // Rutas de actividades/pendientes
 router.post('/actividades', devuelveActividades);

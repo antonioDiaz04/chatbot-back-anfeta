@@ -18,9 +18,11 @@ export const signIn = async (req, res) => {
       });
     }
 
+    console.log(userFound)
+
 
     const token = await createAccessToken({
-      id: userFound.collaboratorId,
+      id: userFound.id,
       email: userFound.email,
       username: userFound.firstName,
     });
