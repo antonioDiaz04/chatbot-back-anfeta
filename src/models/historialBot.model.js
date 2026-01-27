@@ -1,5 +1,31 @@
 import mongoose from "mongoose";
 
+const EstadoTareaSchema = new mongoose.Schema({
+    taskId: String,
+    taskName: String,
+    actividadTitulo: String,
+
+    explicada: {
+        type: Boolean,
+        default: false
+    },
+
+    validada: {
+        type: Boolean,
+        default: false
+    },
+
+    explicacion: {
+        type: String,
+        default: ""
+    },
+
+    ultimoIntento: {
+        type: Date,
+        default: null
+    }
+}, { _id: false });
+
 
 const TareaPendienteSchema = new mongoose.Schema({
     id: String,
@@ -98,6 +124,10 @@ const HistorialSchema = new mongoose.Schema(
         sessionId: {
             type: String,
             required: true
+        },
+        tareasEstado: {
+            type: [EstadoTareaSchema],
+            default: []
         },
         mensajes: {
             type: [MensajeSchema],

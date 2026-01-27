@@ -1,32 +1,49 @@
-import HistorialBot from "../models/historialBot.mode.js";
+// Agregar estas funciones helper en tu controlador o en un archivo separado
 
 /**
- * Guarda un mensaje en el historial del bot.
- * @param {String} userId - ID del usuario
- * @param {String} sessionId - ID de la sesión actual
- * @param {String} role - 'usuario' o 'bot'
- * @param {String} contenido - Contenido del mensaje
- * @returns {Promise<Object>} - El documento actualizado
+ * Guarda o actualiza el historial de conversación
  */
-export async function guardarMensajeHistorial(odooUserId, sessionId, role, contenido) {
+async function guardarMensajeHistorial(userId, sessionId, mensaje, analisis = null) {
   try {
-    if (!odooUserId || !sessionId || !role || !contenido) {
-      throw new Error("Faltan datos requeridos para guardar el mensaje");
-    }
+    const nuevoMensaje = {
+      role: mensaje.role, // "usuario" o "bot"
+      contenido: mensaje.contenido,
+      timestamp: new Date(),
+      tipoMensaje: mensaje.tipoMensaje || "texto",
+      analisis: analisis
+    };
 
-    // Guardar el mensaje en MongoDB
-    const registro = await HistorialBot.findOneAndUpdate(
-      { userId: odooUserId, sessionId },
+    const historial = await HistorialBot.findOneAndUpdate(
+      { userId, sessionId },
       {
-        $push: { mensajes: { role, contenido, timestamp: new Date() } },
-        $setOnInsert: { odooUserId, sessionId }
+        $push: { mensajes: nuevoMensaje },
+        $set: { 
+          ultimoAnalisis: analisis,
+          estadoConversacion: mensaje.estadoConversacion || "esperando_usuario"
+        }
       },
-      { new: true, upsert: true } // crea el documento si no existe
+      { upsert: true, new: true }
     );
 
-    return registro;
+    return historial;
   } catch (error) {
-    console.error("Error guardando mensaje en historial:", error.message);
-    return null;
+    console.error("Error guardando mensaje en historial:", error);
+    throw error;
+  }
+}
+
+/**
+ * Actualiza el estado de las tareas en el historial
+ */
+async function actualizarEstadoTareas(userId, sessionId, tareas) {
+  try {
+    return await HistorialBot.findOneAndUpdate(
+      { userId, sessionId },
+      { $set: { tareasEstado: tareas } },
+      { upsert: true, new: true }
+    );
+  } catch (error) {
+    console.error("Error actualizando estado de tareas:", error);
+    throw error;
   }
 }

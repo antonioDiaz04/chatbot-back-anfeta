@@ -1,2016 +1,16 @@
 import axios from 'axios';
-import jwt from "jsonwebtoken";
-import { TOKEN_SECRET } from "../config.js";
 import { getAllUsers } from './users.controller.js';
+import jwt from 'jsonwebtoken';
 import { isGeminiQuotaError } from '../libs/geminiRetry.js'
 import { sanitizeObject } from '../libs/sanitize.js'
 import { smartAICall } from '../libs/aiService.js';
-import { guardarMensajeHistorial } from '../libs/guardarHistorial.js';
 import { generarSessionIdDiario } from '../libs/generarSessionIdDiario.js';
 import { horaAMinutos } from '../libs/horaAMinutos.js';
-import ProyectosSchema from "../models/proyectos.model.js";
-import HistorialBot from "../models/historialBot.mode.js";
+import ActividadesSchema from "../models/actividades.model.js";
+import HistorialBot from "../models/historialBot.model.js";
+import { TOKEN_SECRET } from '../config.js';
 
 const urlApi = 'https://wlserver-production.up.railway.app/api';
-
-export async function getActividadesConRevisiones(req, res) {
-    try {
-        const { email, question = "¿Qué actividades y revisiones tengo hoy? ¿Qué me recomiendas priorizar?", showAll = false } = sanitizeObject(req.body);
-
-        const { token } = req.cookies;
-
-        if (!token) {
-            return res.status(401).json({
-                success: false,
-                message: "No autenticado"
-            });
-        }
-
-        let decoded;
-
-        try {
-            decoded = jwt.verify(token, TOKEN_SECRET);
-        } catch (err) {
-            console.log(err)
-            return res.status(401).json({ message: "Token inválido" });
-        }
-
-        const odooUserId = decoded.id;
-
-        const sessionId = generarSessionIdDiario(odooUserId)
-
-        const usersData = await getAllUsers();
-        const user = usersData.items.find(
-            (u) => u.email.toLowerCase() === email.toLowerCase()
-        );
-
-        if (!user) {
-            return res.status(404).json({ error: 'Usuario no encontrado' });
-        }
-
-        // Obtener actividades del día para el usuario
-        const actividadesResponse = await axios.get(
-            `${urlApi}/actividades/assignee/${email}/del-dia`
-        );
-
-        const actividadesRaw = actividadesResponse.data.data;
-
-        if (!Array.isArray(actividadesRaw) || actividadesRaw.length === 0) {
-            const respuestaSinActividades = "No tienes actividades registradas para hoy";
-
-            // ✅ Guardar respuesta del bot en historial
-            await guardarMensajeHistorial(odooUserId, sessionId, "bot", respuestaSinActividades);
-
-            return res.json({
-                success: true,
-                answer: respuestaSinActividades,
-                sessionId: sessionId,
-                actividades: [],
-                revisionesPorActividad: {}
-            });
-        }
-
-        // OBTENER PROYECTO PRINCIPAL (actividad 09:30-16:30) - DINÁMICO
-        const actividadPrincipal = actividadesRaw.find(a =>
-            a.horaInicio === '09:30' && a.horaFin === '16:30'
-        );
-
-        // Extraer el nombre del proyecto principal DINÁMICAMENTE
-        let proyectoPrincipal = "Sin proyecto específico";
-        if (actividadPrincipal) {
-            if (actividadPrincipal.tituloProyecto && actividadPrincipal.tituloProyecto !== "Sin proyecto") {
-                proyectoPrincipal = actividadPrincipal.tituloProyecto;
-            } else if (actividadPrincipal.titulo) {
-                // Intentar extraer del título
-                const tituloLimpio = actividadPrincipal.titulo
-                    .replace('analizador de pendientes 00act', '')
-                    .replace('anfeta', '')
-                    .trim();
-                proyectoPrincipal = tituloLimpio || actividadPrincipal.titulo.substring(0, 50) + "...";
-            }
-        }
-
-        // FILTRAR según el parámetro showAll
-        let actividadesFiltradas = [];
-        let mensajeHorario = "";
-        let mostrarSoloConTiempo = true;
-
-        if (question.includes("otros horarios") || showAll) {
-            actividadesFiltradas = actividadesRaw;
-            mensajeHorario = "Mostrando todas las actividades del día";
-            mostrarSoloConTiempo = false;
-        } else {
-            actividadesFiltradas = actividadesRaw.filter((a) => {
-                return a.horaInicio === '09:30' && a.horaFin === '16:30';
-            });
-            mensajeHorario = "Actividades en horario 09:30-16:30";
-            if (actividadesFiltradas.length === 0) {
-                const respuestaSinHorario = "No tienes actividades programadas en el horario de 09:30 a 16:30";
-
-                // Guardar respuesta del bot en historial
-                await guardarMensajeHistorial(odooUserId, sessionId, "bot", respuestaSinHorario);
-
-                return res.json({
-                    success: true,
-                    answer: respuestaSinHorario,
-                    sessionId: sessionId,
-                    actividades: actividadesRaw.map(a => ({
-                        id: a.id,
-                        titulo: a.titulo,
-                        horario: `${a.horaInicio} - ${a.horaFin}`,
-                        status: a.status,
-                        proyecto: a.tituloProyecto || "Sin proyecto"
-                    })),
-                    revisionesPorActividad: {},
-                    proyectoPrincipal: proyectoPrincipal,
-                    sugerencias: [
-                        "¿Quieres ver todas tus actividades del día?",
-                        "¿Necesitas ayuda con actividades en otros horarios?",
-                        "¿Quieres que te ayude a planificar estas actividades?"
-                    ]
-                });
-            }
-        }
-        const actividadesMap = new Map();
-        actividadesFiltradas.forEach(a => {
-            if (!actividadesMap.has(a.id)) {
-                actividadesMap.set(a.id, a);
-            }
-        });
-        actividadesFiltradas = Array.from(actividadesMap.values());
-
-        // 2️⃣ Extraer IDs de todas las actividades filtradas
-        const actividadIds = actividadesFiltradas.map(a => a.id);
-
-        // 3️⃣ Obtener fecha actual para las revisiones
-        const today = new Date();
-        const formattedToday = today.toISOString().split('T')[0];
-
-        // 4️⃣ Obtener TODAS las revisiones del día
-        let todasRevisiones = { colaboradores: [] };
-        try {
-            const revisionesResponse = await axios.get(
-                `${urlApi}/reportes/revisiones-por-fecha`,
-                {
-                    params: {
-                        date: formattedToday,
-                        colaborador: email
-                    }
-                }
-            );
-
-            if (revisionesResponse.data?.success) {
-                todasRevisiones = revisionesResponse.data.data || { colaboradores: [] };
-            }
-        } catch (error) {
-            console.warn("Error obteniendo revisiones:", error.message);
-        }
-
-        // 5️⃣ Filtrar y organizar revisiones por actividad
-        const revisionesPorActividad = {};
-        const tareasConTiempo = {};
-        const tareasSinTiempo = {};
-
-        actividadesFiltradas.forEach(actividad => {
-            revisionesPorActividad[actividad.id] = {
-                actividad: {
-                    id: actividad.id,
-                    titulo: actividad.titulo,
-                    horaInicio: actividad.horaInicio,
-                    horaFin: actividad.horaFin,
-                    status: actividad.status,
-                    proyecto: actividad.tituloProyecto
-                },
-                pendientesConTiempo: [],
-                pendientesSinTiempo: []
-            };
-
-            tareasConTiempo[actividad.id] = [];
-            tareasSinTiempo[actividad.id] = [];
-        });
-
-
-        // Procesar revisiones - SEPARAR por tiempo
-        if (todasRevisiones.colaboradores && Array.isArray(todasRevisiones.colaboradores)) {
-            todasRevisiones.colaboradores.forEach(colaborador => {
-                (colaborador.items?.actividades ?? []).forEach(actividad => {
-                    if (actividadIds.includes(actividad.id) && actividad.pendientes) {
-                        (actividad.pendientes ?? []).forEach(p => {
-                            const estaAsignado = p.assignees?.some(a => a.name === email);
-                            if (!estaAsignado) return;
-
-                            // ✅ VERIFICAR SI YA EXISTE ANTES DE AGREGAR
-                            const yaExisteConTiempo = revisionesPorActividad[actividad.id].pendientesConTiempo.some(
-                                existente => existente.id === p.id
-                            );
-                            const yaExisteSinTiempo = revisionesPorActividad[actividad.id].pendientesSinTiempo.some(
-                                existente => existente.id === p.id
-                            );
-
-                            if (yaExisteConTiempo || yaExisteSinTiempo) return; // ✅ SALTAR SI YA EXISTE
-
-                            const pendienteInfo = {
-                                id: p.id,
-                                nombre: p.nombre,
-                                terminada: p.terminada,
-                                confirmada: p.confirmada,
-                                duracionMin: p.duracionMin || 0,
-                                fechaCreacion: p.fechaCreacion,
-                                fechaFinTerminada: p.fechaFinTerminada,
-                                diasPendiente: p.fechaCreacion ?
-                                    Math.floor((new Date() - new Date(p.fechaCreacion)) / (1000 * 60 * 60 * 24)) : 0
-                            };
-
-                            // SEPARAR por tiempo
-                            if (p.duracionMin && p.duracionMin > 0) {
-                                pendienteInfo.prioridad = p.duracionMin > 60 ? "ALTA" :
-                                    p.duracionMin > 30 ? "MEDIA" : "BAJA";
-                                tareasConTiempo[actividad.id].push(pendienteInfo);
-                                revisionesPorActividad[actividad.id].pendientesConTiempo.push(pendienteInfo);
-                            } else {
-                                pendienteInfo.prioridad = "SIN TIEMPO";
-                                tareasSinTiempo[actividad.id].push(pendienteInfo);
-                                revisionesPorActividad[actividad.id].pendientesSinTiempo.push(pendienteInfo);
-                            }
-                        });
-                    }
-                });
-            });
-        }
-
-        // 6️⃣ Calcular métricas
-        let totalTareasConTiempo = 0;
-        let totalTareasSinTiempo = 0;
-        let tareasAltaPrioridad = 0;
-        let tiempoTotalEstimado = 0;
-
-        Object.keys(revisionesPorActividad).forEach(actividadId => {
-            const actividad = revisionesPorActividad[actividadId];
-            totalTareasConTiempo += actividad.pendientesConTiempo.length;
-            totalTareasSinTiempo += actividad.pendientesSinTiempo.length;
-            tareasAltaPrioridad += actividad.pendientesConTiempo.filter(t => t.prioridad === "ALTA").length;
-            tiempoTotalEstimado += actividad.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0);
-        });
-
-        const horasTotales = Math.floor(tiempoTotalEstimado / 60);
-        const minutosTotales = tiempoTotalEstimado % 60;
-        const totalTareas = totalTareasConTiempo + totalTareasSinTiempo;
-
-        // Guardar el proyecto
-        try {
-            await ProyectosSchema.findOneAndUpdate(
-                {
-                    userId: odooUserId,
-                    nombre: proyectoPrincipal
-                },
-                {
-                    $setOnInsert: {
-                        userId: odooUserId,
-                        actividades: [],
-                        nombre: proyectoPrincipal
-                    }
-                },
-                { upsert: true }
-            );
-        } catch (error) {
-            if (error.code === 11000) {
-                return res.status(400).json({
-                    status: "error",
-                    message: "El nombre del proyecto ya existe en la base de datos."
-                });
-            }
-            // Manejar otros errores
-            next(error);
-        }
-
-        // Guardar actividades (SOLO UN FOR)
-        for (const actividadId of Object.keys(revisionesPorActividad)) {
-            const actividad = revisionesPorActividad[actividadId];
-
-            // Deduplicar con Map
-            const pendientesMap = new Map();
-            actividad.pendientesConTiempo.forEach(p => {
-                if (!pendientesMap.has(p.id)) {
-                    pendientesMap.set(p.id, {
-                        pendienteId: p.id,
-                        nombre: p.nombre || "",
-                        descripcion: "",
-                        estado: p.terminada ? "completado" : "pendiente",
-                        duracionMin: p.duracionMin || 0,
-                        prioridad: p.prioridad || "BAJA",
-                        fechaCreacion: p.fechaCreacion ? new Date(p.fechaCreacion) : new Date()
-                    });
-                }
-            });
-            const pendientesUnicos = Array.from(pendientesMap.values());
-
-            // Actualizar actividades por dia
-            try {
-                const resultado = await ProyectosSchema.updateOne(
-                    {
-                        userId: odooUserId,
-                        "actividades.ActividadId": actividadId
-                    },
-                    {
-                        $set: {
-                            "actividades.$.pendientes": pendientesUnicos,
-                            "actividades.$.estado": "En proceso"
-                        }
-                    }
-                );
-
-                if (resultado.matchedCount === 0) {
-                    await ProyectosSchema.updateOne(
-                        { userId: odooUserId },
-                        {
-                            $push: {
-                                actividades: {
-                                    ActividadId: actividadId,
-                                    pendientes: pendientesUnicos,
-                                    estado: "En proceso"
-                                }
-                            }
-                        }
-                    );
-                }
-
-                console.log(`✔ Actividad ${actividadId}: ${pendientesUnicos.length} pendientes únicos`);
-            } catch (err) {
-                console.error(`❌ Error guardando actividad ${actividadId}:`, err.message);
-            }
-        }
-        // 7️⃣ Construir prompt según el tipo de análisis
-        let prompt = "";
-
-        if (question.includes("otros horarios") || showAll || !mostrarSoloConTiempo) {
-            // Prompt para mostrar TODAS las actividades
-            prompt = `
-Eres un asistente que analiza todas las actividades del día.
-Usuario: ${user.firstName} (${email})
-Proyecto principal asignado: "${proyectoPrincipal}"
-
-Contexto: Mostrando todas las actividades del día, incluyendo las que tienen y no tienen tiempo estimado.
-
-${mensajeHorario}
-Total actividades: ${actividadesFiltradas.length}
-Total tareas: ${totalTareas} (${totalTareasConTiempo} con tiempo, ${totalTareasSinTiempo} sin tiempo)
-Tiempo estimado de las tareas con tiempo: ${horasTotales}h ${minutosTotales}m
-
-PROYECTO PRINCIPAL DEL DÍA (09:30-16:30):
-"${proyectoPrincipal}"
-
-DETALLE DE ACTIVIDADES:
-${actividadesFiltradas.map((actividad, index) => {
-                const revisiones = revisionesPorActividad[actividad.id] || { pendientesConTiempo: [], pendientesSinTiempo: [] };
-                const conTiempo = revisiones.pendientesConTiempo;
-                const sinTiempo = revisiones.pendientesSinTiempo;
-                const esPrincipal = actividad.horaInicio === '09:30' && actividad.horaFin === '16:30';
-                const indicadorPrincipal = esPrincipal ? " [PROYECTO PRINCIPAL]" : "";
-
-                let actividadTexto = `
-${index + 1}. ${actividad.horaInicio} - ${actividad.horaFin} - ${actividad.titulo}${indicadorPrincipal}
-   • Proyecto: ${actividad.tituloProyecto || "Sin proyecto"}
-   • Estado: ${actividad.status}
-   • Total tareas: ${conTiempo.length + sinTiempo.length} (${conTiempo.length} con tiempo, ${sinTiempo.length} sin tiempo)`;
-
-                if (conTiempo.length > 0) {
-                    actividadTexto += `
-   • TAREAS CON TIEMPO:`;
-                    conTiempo.forEach((tarea, i) => {
-                        actividadTexto += `
-     ${i + 1}. ${tarea.nombre}
-        - ${tarea.duracionMin} min | Prioridad: ${tarea.prioridad} | Dias: ${tarea.diasPendiente}d`;
-                    });
-                }
-
-                if (sinTiempo.length > 0) {
-                    actividadTexto += `
-   • TAREAS SIN TIEMPO:`;
-                    sinTiempo.forEach((tarea, i) => {
-                        actividadTexto += `
-     ${i + 1}. ${tarea.nombre} (${tarea.diasPendiente}d pendiente)`;
-                    });
-                }
-
-                if (conTiempo.length === 0 && sinTiempo.length === 0) {
-                    actividadTexto += '\n   • Sin tareas asignadas';
-                }
-
-                return actividadTexto;
-            }).join('\n')}
-
-PREGUNTA DEL USUARIO: "${question}"
-
-INSTRUCCIONES ESTRICTAS DE RESPUESTA:
-1. COMIENZA mencionando el proyecto principal: "Tu proyecto principal es '${proyectoPrincipal}'"
-2. Da un resumen general de todas las actividades mencionando el proyecto principal
-3. Diles si están al día o menciona pendientes importantes del proyecto principal
-4. Lista los puntos principales con viñetas relacionadas con el proyecto principal
-5. Al final da sugerencias específicas: "Te recomiendo que empieces con [lista de tareas DEL PROYECTO PRINCIPAL] porque [razón]"
-6. Pregunta si están de acuerdo con la sugerencia
-7. Se natural y directo
-8. NO uses emojis ni formato especial
-9. Relaciona TODO con el proyecto principal
-
-EJEMPLO DE RESPUESTA:
-"Tu proyecto principal es '${proyectoPrincipal}'. Estás al día con 4 actividades hoy.
-• Para tu proyecto principal tienes 4 tareas con tiempo asignado
-• Hay 13 tareas sin tiempo que requieren estimación
-• La tarea de alta prioridad está relacionada con el proyecto principal
-
-Sugerencia desde mi punto de vista: te recomiendo que empieces con la tarea de creación de rutas API de tu proyecto principal, después las correcciones y finalmente las pruebas de integración porque esta secuencia optimiza tu tiempo. ¿Estás de acuerdo?"
-`.trim();
-        } else {
-            // Prompt normal (solo tareas con tiempo) - CON PROYECTO PRINCIPAL
-            prompt = `
-Eres un asistente que analiza actividades del día con tiempo asignado.
-Usuario: ${user.firstName} (${email})
-Proyecto principal asignado: "${proyectoPrincipal}"
-
-TAREAS CON TIEMPO ASIGNADO para tu proyecto "${proyectoPrincipal}":
-Total: ${totalTareasConTiempo} tareas | Tiempo total: ${horasTotales}h ${minutosTotales}m
-Tareas alta prioridad: ${tareasAltaPrioridad}
-
-${Object.values(revisionesPorActividad).flatMap(act =>
-                act.pendientesConTiempo.map(r =>
-                    `• ${r.nombre} - ${r.duracionMin}min (${r.prioridad}, ${r.diasPendiente}d)`
-                )
-            ).join('\n')}
-
-PREGUNTA: "${question}"
-
-INSTRUCCIONES ESTRICTAS DE RESPUESTA:
-1. COMIENZA mencionando el proyecto principal: "Para tu proyecto '${proyectoPrincipal}'"
-2. Enfócate SOLO en las tareas con tiempo asignado de este proyecto
-3. Da prioridad principal basada en el proyecto
-4. Recomendación breve relacionada con el proyecto
-5. Pregunta final corta relacionada con el proyecto
-6. MÁXIMO 4 renglones
-7. SIN emojis
-8. SIN formato especial
-
-EJEMPLO DE RESPUESTA:
-"Para tu proyecto '${proyectoPrincipal}', prioriza la creación de rutas API (80min, ALTA). Tienes 2h55m disponibles para este proyecto. ¿Por cuál tarea del proyecto quieres empezar?"
-`.trim();
-        }
-
-        // 8️⃣ Obtener respuesta de IA
-        const aiResult = await smartAICall(prompt);
-
-        // ✅ Guardar respuesta del bot en historial
-        await guardarMensajeHistorial(odooUserId, sessionId, "bot", aiResult.text);
-
-        // 9️⃣ Preparar respuesta según el tipo
-        let respuestaData = {
-            actividades: actividadesFiltradas.map(a => ({
-                id: a.id,
-                titulo: a.titulo,
-                horario: `${a.horaInicio} - ${a.horaFin}`,
-                status: a.status,
-                proyecto: a.tituloProyecto || "Sin proyecto",
-                esPrincipal: a.horaInicio === '09:30' && a.horaFin === '16:30'
-            })),
-            revisionesPorActividad: {}
-        };
-
-
-        if (question.includes("otros horarios") || showAll) {
-            respuestaData.revisionesPorActividad = Object.values(revisionesPorActividad)
-                .filter(item => item.pendientesConTiempo.length > 0 || item.pendientesSinTiempo.length > 0)
-                .map(item => ({
-                    actividadId: item.actividad.id,
-                    actividadTitulo: item.actividad.titulo,
-                    tareasConTiempo: item.pendientesConTiempo,
-                    tareasSinTiempo: item.pendientesSinTiempo,
-                    totalTareas: item.pendientesConTiempo.length + item.pendientesSinTiempo.length,
-                    tareasAltaPrioridad: item.pendientesConTiempo.filter(t => t.prioridad === "ALTA").length,
-                    tiempoTotal: item.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0)
-                }));
-        } else {
-            respuestaData.revisionesPorActividad = Object.values(revisionesPorActividad)
-                .filter(item => item.pendientesConTiempo.length > 0)
-                .map(item => ({
-                    actividadId: item.actividad.id,
-                    actividadTitulo: item.actividad.titulo,
-                    pendientesPlanificados: item.pendientesConTiempo.length,
-                    pendientesAlta: item.pendientesConTiempo.filter(p => p.prioridad === "ALTA").length,
-                    tiempoTotal: item.pendientesConTiempo.reduce((sum, p) => sum + (p.duracionMin || 0), 0),
-                    pendientes: item.pendientesConTiempo
-                }));
-        }
-
-        // 🔟 Respuesta completa
-        return res.json({
-            success: true,
-            answer: aiResult.text,
-            provider: aiResult.provider,
-            sessionId: sessionId,
-            proyectoPrincipal: proyectoPrincipal,
-            metrics: {
-                totalActividades: actividadesFiltradas.length,
-                tareasConTiempo: totalTareasConTiempo,
-                tareasSinTiempo: totalTareasSinTiempo,
-                tareasAltaPrioridad: tareasAltaPrioridad,
-                tiempoEstimadoTotal: `${horasTotales}h ${minutosTotales}m`
-            },
-            data: respuestaData,
-            separadasPorTiempo: true,
-            sugerencias: question.includes("otros horarios") || showAll ? [
-                `¿Te gustaría estimar tiempo para las ${totalTareasSinTiempo} tareas sin tiempo de '${proyectoPrincipal}'?`,
-                `¿Quieres que te ayude a priorizar las tareas de '${proyectoPrincipal}'?`,
-                "¿Necesitas ayuda para organizar tu día completo?"
-            ] : [
-                `¿Quieres profundizar en alguna tarea de '${proyectoPrincipal}'?`,
-                `¿Necesitas ayuda para organizar las tareas de '${proyectoPrincipal}' por tiempo?`,
-                "¿Quieres ver todas tus actividades del día?"
-            ]
-        });
-
-    } catch (error) {
-        if (error.message === "AI_PROVIDER_FAILED") {
-            return res.status(503).json({
-                success: false,
-                message: "El asistente está muy ocupado. Intenta de nuevo en un minuto."
-            });
-        }
-
-        if (isGeminiQuotaError(error)) {
-            return res.status(429).json({
-                success: false,
-                reason: "QUOTA_EXCEEDED",
-                message: "El asistente está temporalmente saturado."
-            });
-        }
-
-        console.error("Error:", error);
-        return res.status(500).json({
-            success: false,
-            message: "Error interno"
-        });
-    }
-}
-
-// Funciones originales (mantener compatibilidad)
-export async function devuelveActividades(req, res) {
-    try {
-        const { email } = sanitizeObject(req.body);
-
-
-        // Obtener el ID del usuario desde el token (viene del middleware de auth)
-        const { token } = req.cookies;
-        const decoded = jwt.verify(token, TOKEN_SECRET);
-        const sessionUserId = decoded.id;
-
-        const sessionId = generarSessionIdDiario(sessionUserId);
-
-        // ✅ Guardar consulta del usuario en historial
-        await guardarMensajeHistorial(
-            sessionUserId,
-            sessionId,
-            "usuario",
-            `Consulta de actividades del día para ${email}`
-        );
-
-        const response = await axios.get(
-            `${urlApi}/actividades/assignee/${email}/del-dia`
-        );
-
-        const actividadesRaw = response.data.data;
-
-        if (!Array.isArray(actividadesRaw)) {
-            // ✅ Guardar respuesta del bot en historial
-            await guardarMensajeHistorial(
-                sessionUserId,
-                sessionId,
-                "bot",
-                "No se encontraron actividades (respuesta inválida)"
-            );
-            return res.json([]);
-        }
-
-        // 1. Filtrar SOLO la actividad en horario 09:30-16:30
-        const actividadSeleccionada = actividadesRaw.find((a) => {
-            const inicio = horaAMinutos(a.horaInicio?.trim());
-            const fin = horaAMinutos(a.horaFin?.trim());
-
-            return inicio === horaAMinutos('09:30') && fin === horaAMinutos('16:30');
-        });
-
-        // 2. Si no hay actividad en ese horario, retornar array vacío
-        if (!actividadSeleccionada) {
-            // ✅ Guardar respuesta del bot en historial
-            await guardarMensajeHistorial(
-                sessionUserId,
-                sessionId,
-                "bot",
-                "No hay actividades en horario 09:30-16:30"
-            );
-            return res.json([]);
-        }
-
-        // 3. Extraer duracionMin de cada pendiente
-        const duracionesMin = actividadSeleccionada.pendientes && Array.isArray(actividadSeleccionada.pendientes)
-            ? actividadSeleccionada.pendientes.map(p => p.duracionMin || 0)
-            : [];
-
-        // 4. Crear objeto con la estructura requerida
-        const resultado = {
-            t: actividadSeleccionada.titulo ? actividadSeleccionada.titulo.slice(0, 60) : "Sin título",
-            h: `${actividadSeleccionada.horaInicio}-${actividadSeleccionada.horaFin}`,
-            p: actividadSeleccionada.pendientes ? actividadSeleccionada.pendientes.length : 0,
-            duraciones: duracionesMin
-        };
-
-        // 5. Filtrar según la regla (debe tener valor en "h")
-        const actividadesFiltradas = resultado.h != null && resultado.h !== ""
-            ? [resultado]
-            : [];
-
-        // ✅ Guardar respuesta del bot en historial
-        await guardarMensajeHistorial(
-            sessionUserId,
-            sessionId,
-            "bot",
-            `Actividad encontrada: "${resultado.t}" con ${resultado.p} pendientes`
-        );
-
-        return res.json(actividadesFiltradas);
-
-    } catch (error) {
-        console.error("Error:", error);
-        return res.status(500).json({
-            success: false,
-            message: "Error interno"
-        });
-    }
-}
-
-export async function devuelveActReviciones(req, res) {
-    try {
-        const { email, idsAct, sessionId: reqSessionId } = sanitizeObject(req.body);
-
-        if (!email || !Array.isArray(idsAct)) {
-            return res.status(400).json({
-                success: false,
-                message: "Parámetros inválidos"
-            });
-        }
-
-        const { token } = req.cookies;
-        const decoded = jwt.verify(token, TOKEN_SECRET);
-        const odooUserId = decoded.id;
-
-
-        const sessionId = generarSessionIdDiario(odooUserId);;
-
-        // ✅ Guardar consulta del usuario en historial
-        await guardarMensajeHistorial(
-            odooUserId,
-            sessionId,
-            "usuario",
-            `Consulta de revisiones para ${idsAct.length} actividades`
-        );
-
-        const today = new Date();
-        const formattedToday = today.toISOString().split('T')[0];
-
-        const response = await axios.get(
-            `${urlApi}/reportes/revisiones-por-fecha?date=${formattedToday}&colaborador=${email}`
-        );
-
-        if (!response.data?.success) {
-            return res.status(500).json({
-                success: false,
-                message: "Error al obtener revisiones"
-            });
-        }
-
-        const revisiones = response.data.data;
-        const actividadesRevi = new Map();
-
-        revisiones.colaboradores.forEach(colaborador => {
-            (colaborador.items?.actividades ?? []).forEach(actividad => {
-                if (idsAct.length && !idsAct.includes(actividad.id)) return;
-
-                const pendientesFiltrados = (actividad.pendientes ?? [])
-                    .filter(p => p.assignees?.some(a => a.name === email))
-                    .map(p => ({
-                        id: p.id,
-                        nombre: p.nombre,
-                        terminada: p.terminada,
-                        confirmada: p.confirmada,
-                        duracionMin: p.duracionMin,
-                        fechaCreacion: p.fechaCreacion,
-                        fechaFinTerminada: p.fechaFinTerminada,
-                        prioridad: p.duracionMin > 60 ? "ALTA" :
-                            p.duracionMin > 30 ? "MEDIA" :
-                                p.duracionMin > 0 ? "BAJA" : "SIN TIEMPO"
-                    }));
-
-                if (!pendientesFiltrados.length) return;
-
-                if (!actividadesRevi.has(actividad.id)) {
-                    actividadesRevi.set(actividad.id, {
-                        actividades: {
-                            id: actividad.id,
-                            titulo: actividad.titulo
-                        },
-                        pendientes: pendientesFiltrados,
-                        assignees: pendientesFiltrados[0]?.assignees ?? [
-                            { name: email }
-                        ]
-                    });
-                }
-            });
-        });
-
-        const resultado = Array.from(actividadesRevi.values());
-        const totalPendientes = resultado.reduce((sum, act) => sum + act.pendientes.length, 0);
-
-        // ✅ Guardar respuesta del bot en historial
-        await guardarMensajeHistorial(
-            odooUserId,
-            sessionId,
-            "bot",
-            `Se encontraron ${resultado.length} actividades con ${totalPendientes} pendientes totales.`
-        );
-
-        return res.status(200).json({
-            success: true,
-            sessionId: sessionId,
-            data: resultado
-        });
-
-    } catch (error) {
-        if (isGeminiQuotaError(error)) {
-            return res.status(429).json({
-                success: false,
-                reason: "QUOTA_EXCEEDED",
-                message: "Intenta nuevamente en unos minutos."
-            });
-        }
-
-        return res.status(500).json({
-            success: false,
-            message: "Error interno"
-        });
-    }
-}
-
-export async function guardarPendientes(req, res) {
-    try {
-        // Acepta tanto userId como odooUserId para compatibilidad
-        const { proyectoPrincipal, activityId, pendientes, answer } = sanitizeObject(req.body);
-
-        const { token } = req.cookies;
-        const decoded = jwt.verify(token, TOKEN_SECRET);
-        const odooUserId = decoded.id;
-
-        // id del usuario
-        const finalUserId = odooUserId;
-
-        if (!finalUserId || !activityId || !Array.isArray(pendientes)) {
-            console.log("error datos faltentes o los pendientes no son un array")
-            return res.status(400).json({
-                error: "Faltan datos requeridos"
-            });
-        }
-
-        const sessionId = generarSessionIdDiario(finalUserId);
-
-        // ✅ Guardar acción del usuario en historial
-        await guardarMensajeHistorial(
-            finalUserId,
-            sessionId,
-            "usuario",
-            `Guardando ${pendientes.length} pendientes para la actividad ${activityId}`
-        );
-
-        const registro = await ProyectosSchema.create({
-            userId: finalUserId,  // Guardar con el campo original del modelo
-            activityId,
-            pendientes
-        });
-
-        // ✅ Guardar confirmación del bot en historial
-        await guardarMensajeHistorial(
-            finalUserId,
-            sessionId,
-            "bot",
-            `Se guardaron exitosamente ${pendientes.length} pendientes. ID: ${registro._id}`
-        );
-
-        res.status(201).json({
-            ...registro.toObject(),
-            sessionId: sessionId
-        });
-    } catch (error) {
-        console.error("Error en guardarPendientes:", error);
-        res.status(500).json({ error: error.message });
-    }
-}
-
-/**
- * Obtiene el historial de una sesión específica
- */
-
-export async function obtenerHistorialSesion(req, res) {
-    try {
-        const { token } = req.cookies;
-
-        if (!token) {
-            return res.status(401).json({ success: false, message: "No autenticado" });
-        }
-
-        const decoded = jwt.verify(token, TOKEN_SECRET);
-        const userId = decoded.id;
-
-
-        const sessionId = generarSessionIdDiario(userId);
-
-        // Buscamos el historial y los proyectos en paralelo
-        const [historial, proyectos] = await Promise.all([
-            HistorialBot.findOne({ userId, sessionId }).lean(),
-            ProyectosSchema.findOne({ userId }).lean()
-        ]);
-
-        if (!historial) {
-            return res.json({
-                success: true,
-                data: null,
-                proyectos: proyectos || null
-            });
-        }
-
-        // Lógica de filtrado: solo actividades que tengan revisión (pendientes)
-        if (
-            historial.data &&
-            Array.isArray(historial.data.revisionesPorActividad) &&
-            Array.isArray(historial.data.actividades)
-        ) {
-            const idsConRevision = new Set(
-                historial.data.revisionesPorActividad.map(r => r.actividadId)
-            );
-
-            historial.data.actividades = historial.data.actividades.filter(
-                actividad => idsConRevision.has(actividad.id)
-            );
-        }
-
-
-        return res.json({
-            success: true,
-            data: historial,
-            proyectos: proyectos || null
-        });
-
-    } catch (error) {
-        console.error("Error al obtener sesión específica:", error);
-        return res.status(500).json({
-            success: false,
-            message: "Error interno del servidor"
-        });
-    }
-}
-
-
-/**
- * Obtiene todos los historiales de un usuario con paginación
- */
-export async function obtenerHistorialesUsuario(req, res) {
-    try {
-        const { limit = 10, skip = 0 } = sanitizeObject(req.query);
-
-        const { token } = req.cookies;
-        const decoded = jwt.verify(token, TOKEN_SECRET);
-        const odooUserId = decoded.id;
-
-
-
-        if (!odooUserId) {
-            return res.status(400).json({
-                success: false,
-                message: "odooUserId es requerido"
-            });
-        }
-
-        const historiales = await HistorialBot.find({ odooUserId })
-            .sort({ updatedAt: -1 })
-            .limit(parseInt(limit))
-            .skip(parseInt(skip));
-
-        const total = await HistorialBot.countDocuments({ odooUserId });
-
-        return res.json({
-            success: true,
-            data: historiales,
-            pagination: {
-                total,
-                limit: parseInt(limit),
-                skip: parseInt(skip),
-                hasMore: (parseInt(skip) + historiales.length) < total
-            }
-        });
-
-    } catch (error) {
-        console.error("Error obteniendo historiales:", error);
-        return res.status(500).json({
-            success: false,
-            message: "Error interno"
-        });
-    }
-}
-
-/**
- * Elimina el historial de una sesión específica
- */
-export async function eliminarHistorialSesion(req, res) {
-    try {
-        const { sessionId } = sanitizeObject(req.body);
-
-
-
-        const { token } = req.cookies;
-        const decoded = jwt.verify(token, TOKEN_SECRET);
-        const odooUserId = decoded.id;
-
-
-
-        if (!odooUserId || !sessionId) {
-            return res.status(400).json({
-                success: false,
-                message: "odooUserId y sessionId son requeridos"
-            });
-        }
-
-        const resultado = await HistorialBot.deleteOne({ odooUserId, sessionId });
-
-        if (resultado.deletedCount === 0) {
-            return res.status(404).json({
-                success: false,
-                message: "No se encontró historial para eliminar"
-            });
-        }
-
-        return res.json({
-            success: true,
-            message: "Historial eliminado correctamente"
-        });
-
-    } catch (error) {
-        console.error("Error eliminando historial:", error);
-        return res.status(500).json({
-            success: false,
-            message: "Error interno"
-        });
-    }
-}
-
-export async function confirmarEstadoPendientes(req, res) {
-    try {
-        const { actividadesId, IdPendientes, estado, motivoNoCompletado } = sanitizeObject(req.body);
-
-        const { token } = req.cookies;
-        const decoded = jwt.verify(token, TOKEN_SECRET);
-        const userId = decoded.id;
-
-        if (!actividadesId || !IdPendientes || !estado) {
-            return res.status(400).json({
-                success: false,
-                message: "actividadesId, IdPendientes y estado son requeridos"
-            });
-        }
-
-        // Actualizamos el estado del pendiente dentro de la actividad del proyecto
-        const resultado = await ProyectosSchema.updateOne(
-            {
-                userId,
-                'actividades.ActividadId': actividadesId,
-                'actividades.pendientes.pendienteId': IdPendientes
-            },
-            {
-                $set: {
-                    'actividades.$[act].pendientes.$[pen].estado': estado,
-                    'actividades.$[act].pendientes.$[pen].motivoNoCompletado': motivoNoCompletado
-                }
-            },
-            {
-                arrayFilters: [
-                    { 'act.ActividadId': actividadesId },
-                    { 'pen.pendienteId': IdPendientes }
-                ]
-            }
-        );
-
-        return res.json({
-            success: true,
-            message: "Estado actualizado correctamente",
-            data: resultado
-        });
-    } catch (error) {
-        console.error("Error actualizando estado:", error);
-        return res.status(500).json({
-            success: false,
-            message: "Error interno"
-        });
-    }
-}
-
-import axios from 'axios';
-import { getAllUsers } from './users.controller.js';
-import { isGeminiQuotaError } from '../libs/geminiRetry.js'
-import { sanitizeObject } from '../libs/sanitize.js'
-import { smartAICall } from '../libs/aiService.js';
-import ActividadPendientes from "../models/actividades.model.js";
-import HistorialBot from "../models/historialBot.mode.js";
-
-const urlApi = 'https://wlserver-production.up.railway.app/api';
-
-// Almacenamiento en memoria para conversaciones (en producción usarías Redis o DB)
-const conversaciones = new Map();
-
-// Función auxiliar
-function horaAMinutos(hora) {
-  if (!hora) return null;
-  const [h, m] = hora.split(':').map(Number);
-  return h * 60 + m;
-}
-
-/**
- * Guarda un mensaje en el historial del bot (MongoDB).
- * @param {String} odooUserId - ID del usuario en Odoo
- * @param {String} sessionId - ID de la sesión actual
- * @param {String} role - 'usuario' o 'bot'
- * @param {String} contenido - Contenido del mensaje
- * @returns {Promise<Object>} - El documento actualizado
- */
-async function guardarMensajeHistorial(odooUserId, sessionId, role, contenido) {
-  try {
-    if (!odooUserId || !sessionId || !role || !contenido) {
-      console.warn("Faltan datos para guardar en historial:", { odooUserId, sessionId, role, contenido: contenido?.substring(0, 50) });
-      return null;
-    }
-
-    const registro = await HistorialBot.findOneAndUpdate(
-      { odooUserId, sessionId },
-      {
-        $push: { mensajes: { role, contenido, timestamp: new Date() } },
-        $setOnInsert: { odooUserId, sessionId }
-      },
-      { new: true, upsert: true }
-    );
-
-    return registro;
-  } catch (error) {
-    console.error("Error guardando mensaje en historial:", error.message);
-    return null;
-  }
-}
-
-
-/**
- * Sistema de conversación interactiva con historial - MEJORADO para manejar sugerencias
- */
-export async function chatInteractivo(req, res) {
-  try {
-    const { email, message, sessionId = `session_${Date.now()}` } = sanitizeObject(req.body);
-
-    if (!email || !message) {
-      return res.status(400).json({
-        success: false,
-        message: "Email y mensaje son requeridos"
-      });
-    }
-
-    // Obtener usuario para el historial
-    const usersData = await getAllUsers();
-    const user = usersData.items.find(
-      (u) => u.email.toLowerCase() === email.toLowerCase()
-    );
-
-    if (!user) {
-      return res.status(404).json({
-        success: false,
-        message: "Usuario no encontrado"
-      });
-    }
-
-    const odooUserId = user.id || user._id || email;
-
-    // 1. Obtener o crear contexto de conversación
-    if (!conversaciones.has(sessionId)) {
-      conversaciones.set(sessionId, {
-        odooUserId: odooUserId,
-        email: email,
-        historial: [],
-        datosActividades: null,
-        ultimaConsulta: null,
-        timestamp: Date.now(),
-        estado: 'inicio',
-        ultimasSugerencias: []
-      });
-    }
-
-    const contexto = conversaciones.get(sessionId);
-    limpiarConversacionesAntiguas();
-
-    // 2. Agregar mensaje del usuario al historial en memoria
-    contexto.historial.push({
-      role: 'user',
-      content: message,
-      timestamp: new Date().toISOString(),
-      esConsultaActividades: false
-    });
-
-    // ✅ Guardar mensaje del usuario en MongoDB
-    await guardarMensajeHistorial(odooUserId, sessionId, "usuario", message);
-
-    // 3. Detectar tipo de mensaje
-    const palabrasClaveActividades = [
-      'actividad', 'tarea', 'pendiente', 'hoy', 'revisión', 'revisar',
-      'qué tengo', 'qué hacer', 'trabajo', 'proyecto', 'jornada',
-      'mañana', 'tarde', 'dia', 'día', 'plan', 'organizar',
-      'priorizar', 'tiempo', 'horario', 'agenda', 'calendario'
-    ];
-
-    const mensajeLower = message.toLowerCase();
-    const esConsultaActividades = palabrasClaveActividades.some(palabra =>
-      mensajeLower.includes(palabra)
-    ) ||
-      mensajeLower.includes('?') && (
-        mensajeLower.includes('qué') ||
-        mensajeLower.includes('cómo') ||
-        mensajeLower.includes('cuándo') ||
-        mensajeLower.includes('cuanto') ||
-        mensajeLower.includes('cuál')
-      );
-
-    // Actualizar historial con el tipo de consulta
-    contexto.historial[contexto.historial.length - 1].esConsultaActividades = esConsultaActividades;
-
-    // 4. Manejar consulta de actividades o conversación normal
-    let respuesta;
-
-    if (esConsultaActividades || !contexto.datosActividades || contexto.estado === 'inicio') {
-      // Obtener y procesar actividades
-      const resultadoActividades = await obtenerYProcesarActividades(email, message, sessionId);
-
-      // Guardar datos en contexto
-      contexto.datosActividades = {
-        actividades: resultadoActividades.data.actividades,
-        revisionesPorActividad: resultadoActividades.data.revisionesPorActividad,
-        metrics: resultadoActividades.metrics,
-        proyectoPrincipal: resultadoActividades.proyectoPrincipal
-      };
-      contexto.ultimaConsulta = new Date().toISOString();
-      contexto.estado = 'tiene_datos';
-      contexto.ultimasSugerencias = resultadoActividades.sugerencias || [];
-
-      // Agregar respuesta al historial en memoria
-      contexto.historial.push({
-        role: 'assistant',
-        content: resultadoActividades.answer,
-        timestamp: new Date().toISOString(),
-        tipo: 'actividades',
-        datosDisponibles: true
-      });
-
-      // ✅ Guardar respuesta del bot en MongoDB
-      await guardarMensajeHistorial(odooUserId, sessionId, "bot", resultadoActividades.answer);
-
-      respuesta = {
-        success: true,
-        answer: resultadoActividades.answer,
-        provider: resultadoActividades.provider,
-        sessionId: sessionId,
-        proyectoPrincipal: resultadoActividades.proyectoPrincipal,
-        metrics: resultadoActividades.metrics,
-        data: resultadoActividades.data,
-        separadasPorTiempo: true,
-        sugerencias: resultadoActividades.sugerencias,
-        sugerenciasConIndices: (resultadoActividades.sugerencias || []).map((sug, index) => ({
-          id: index,
-          text: sug,
-          type: determinarTipoSugerencia(sug)
-        })),
-        contexto: {
-          tieneDatos: true,
-          estado: contexto.estado,
-          historialCount: contexto.historial.length,
-          ultimaConsulta: contexto.ultimaConsulta
-        }
-      };
-
-    } else {
-      // Conversación normal (seguimiento)
-      const promptContexto = construirPromptContexto(contexto, message);
-      const aiResult = await smartAICall(promptContexto);
-
-      // Guardar respuesta en historial en memoria
-      contexto.historial.push({
-        role: 'assistant',
-        content: aiResult.text,
-        timestamp: new Date().toISOString(),
-        tipo: 'conversacion'
-      });
-
-      // ✅ Guardar respuesta del bot en MongoDB
-      await guardarMensajeHistorial(odooUserId, sessionId, "bot", aiResult.text);
-
-      // Actualizar estado
-      contexto.estado = determinarNuevoEstado(aiResult.text, contexto);
-
-      // Generar nuevas sugerencias
-      const nuevasSugerencias = generarSugerencias(contexto.estado, contexto);
-      contexto.ultimasSugerencias = nuevasSugerencias;
-
-      respuesta = {
-        success: true,
-        answer: aiResult.text,
-        provider: aiResult.provider,
-        sessionId: sessionId,
-        contexto: {
-          tieneDatos: contexto.datosActividades !== null,
-          estado: contexto.estado,
-          historialCount: contexto.historial.length,
-          ultimaConsulta: contexto.ultimaConsulta
-        },
-        sugerencias: nuevasSugerencias,
-        sugerenciasConIndices: nuevasSugerencias.map((sug, index) => ({
-          id: index,
-          text: sug,
-          type: determinarTipoSugerencia(sug)
-        }))
-      };
-
-      // Incluir datos si el usuario los pidió específicamente
-      if (mensajeLower.includes('datos') || mensajeLower.includes('información') ||
-        mensajeLower.includes('detalles') || mensajeLower.includes('métrica')) {
-        respuesta.data = {
-          actividades: contexto.datosActividades.actividades,
-          revisiones: contexto.datosActividades.revisionesPorActividad,
-          metrics: contexto.datosActividades.metrics
-        };
-        respuesta.proyectoPrincipal = contexto.datosActividades.proyectoPrincipal;
-        respuesta.metrics = contexto.datosActividades.metrics;
-      }
-    }
-
-    return res.json(respuesta);
-
-  } catch (error) {
-    console.error("Error en chatInteractivo:", error);
-
-    if (error.message === "AI_PROVIDER_FAILED") {
-      return res.status(503).json({
-        success: false,
-        message: "El asistente está muy ocupado en este momento. ¡Danos un minuto y vuelve a intentarlo!",
-        sessionId: req.body.sessionId || `error_${Date.now()}`
-      });
-    }
-
-    if (isGeminiQuotaError(error)) {
-      return res.status(429).json({
-        success: false,
-        reason: "QUOTA_EXCEEDED",
-        message: "El asistente está temporalmente saturado. Intenta nuevamente en unos minutos.",
-        sessionId: req.body.sessionId || `error_${Date.now()}`
-      });
-    }
-
-    return res.status(500).json({
-      success: false,
-      message: "Error interno del servidor",
-      error: error.message,
-      sessionId: req.body.sessionId || `error_${Date.now()}`
-    });
-  }
-}
-// 
-// export async function getActividadesConRevisiones(req, res) {
-//   try {
-//     const { email, question = "¿Qué actividades y revisiones tengo hoy? ¿Qué me recomiendas priorizar?", showAll = false } = sanitizeObject(req.body);
-
-//     if (!email) {
-//       return res.status(400).json({
-//         success: false,
-//         message: "El email es requerido"
-//       });
-//     }
-//     const sessionId = `act_${email}_${Date.now()}`.replace(/[^a-zA-Z0-9_]/g, '_');
-
-//     const usersData = await getAllUsers();
-//     const user = usersData.items.find(
-//       (u) => u.email.toLowerCase() === email.toLowerCase()
-//     );
-
-//     if (!user) {
-//       return res.status(404).json({ error: 'Usuario no encontrado' });
-//     }
-
-//     const { sessionUserId } = req.cookies;
-//     const odooUserId = sessionUserId
-
-//     // ✅ Guardar mensaje del usuario en historial
-//     await guardarMensajeHistorial(odooUserId, sessionId, "usuario", question);
-
-//     // 1️⃣ Obtener actividades del día para el usuario
-//     const actividadesResponse = await axios.get(
-//       `${urlApi}/actividades/assignee/${email}/del-dia`
-//     );
-
-//     const actividadesRaw = actividadesResponse.data.data;
-
-//     if (!Array.isArray(actividadesRaw) || actividadesRaw.length === 0) {
-//       const respuestaSinActividades = "No tienes actividades registradas para hoy";
-
-//       // ✅ Guardar respuesta del bot en historial
-//       await guardarMensajeHistorial(odooUserId, sessionId, "bot", respuestaSinActividades);
-
-//       return res.json({
-//         success: true,
-//         answer: respuestaSinActividades,
-//         sessionId: sessionId,
-//         actividades: [],
-//         revisionesPorActividad: {}
-//       });
-//     }
-
-//     // 🔍 OBTENER PROYECTO PRINCIPAL (actividad 09:30-16:30) - DINÁMICO
-//     const actividadPrincipal = actividadesRaw.find(a =>
-//       a.horaInicio === '09:30' && a.horaFin === '16:30'
-//     );
-
-//     // Extraer el nombre del proyecto principal DINÁMICAMENTE
-//     let proyectoPrincipal = "Sin proyecto específico";
-//     if (actividadPrincipal) {
-//       if (actividadPrincipal.tituloProyecto && actividadPrincipal.tituloProyecto !== "Sin proyecto") {
-//         proyectoPrincipal = actividadPrincipal.tituloProyecto;
-//       } else if (actividadPrincipal.titulo) {
-//         // Intentar extraer del título
-//         const tituloLimpio = actividadPrincipal.titulo
-//           .replace('analizador de pendientes 00act', '')
-//           .replace('anfeta', '')
-//           .trim();
-//         proyectoPrincipal = tituloLimpio || actividadPrincipal.titulo.substring(0, 50) + "...";
-//       }
-//     }
-
-//     // SIEMPRE MOSTRAR TODAS LAS ACTIVIDADES SIN FILTRAR
-//     let actividadesFiltradas = actividadesRaw; // <-- AHORA SIEMPRE TODAS
-//     let mensajeHorario = "Todas tus actividades del día";
-//     let mostrarSoloConTiempo = false; // <-- SIEMPRE falso
-
-//     // 2️⃣ Extraer IDs de todas las actividades (TODAS ahora)
-//     const actividadIds = actividadesFiltradas.map(a => a.id);
-
-//     // 3️⃣ Obtener fecha actual para las revisiones
-//     const today = new Date();
-//     const formattedToday = today.toISOString().split('T')[0];
-
-//     // 4️⃣ Obtener TODAS las revisiones del día
-//     let todasRevisiones = { colaboradores: [] };
-//     try {
-//       const revisionesResponse = await axios.get(
-//         `${urlApi}/reportes/revisiones-por-fecha`,
-//         {
-//           params: {
-//             date: formattedToday,
-//             colaborador: email
-//           }
-//         }
-//       );
-
-//       if (revisionesResponse.data?.success) {
-//         todasRevisiones = revisionesResponse.data.data || { colaboradores: [] };
-//       }
-//     } catch (error) {
-//       console.warn("Error obteniendo revisiones:", error.message);
-//     }
-
-//     // 5️⃣ Inicializar estructura para TODAS las actividades (con o sin revisiones)
-//     const revisionesPorActividad = {};
-//     const tareasConTiempo = {};
-//     const tareasSinTiempo = {};
-
-//     // Inicializar para TODAS las actividades
-//     actividadesFiltradas.forEach(actividad => {
-//       revisionesPorActividad[actividad.id] = {
-//         actividad: {
-//           id: actividad.id,
-//           titulo: actividad.titulo,
-//           horaInicio: actividad.horaInicio,
-//           horaFin: actividad.horaFin,
-//           status: actividad.status,
-//           proyecto: actividad.tituloProyecto
-//         },
-//         pendientesConTiempo: [],
-//         pendientesSinTiempo: []
-//       };
-
-//       tareasConTiempo[actividad.id] = [];
-//       tareasSinTiempo[actividad.id] = [];
-//     });
-
-//     // Procesar revisiones - SEPARAR por tiempo
-//     if (todasRevisiones.colaboradores && Array.isArray(todasRevisiones.colaboradores)) {
-//       todasRevisiones.colaboradores.forEach(colaborador => {
-//         (colaborador.items?.actividades ?? []).forEach(actividad => {
-//           if (actividadIds.includes(actividad.id) && actividad.pendientes) {
-//             (actividad.pendientes ?? []).forEach(p => {
-//               const estaAsignado = p.assignees?.some(a => a.name === email);
-//               if (!estaAsignado) return;
-
-//               const pendienteInfo = {
-//                 id: p.id,
-//                 nombre: p.nombre,
-//                 terminada: p.terminada,
-//                 confirmada: p.confirmada,
-//                 duracionMin: p.duracionMin || 0,
-//                 fechaCreacion: p.fechaCreacion,
-//                 fechaFinTerminada: p.fechaFinTerminada,
-//                 diasPendiente: p.fechaCreacion ?
-//                   Math.floor((new Date() - new Date(p.fechaCreacion)) / (1000 * 60 * 60 * 24)) : 0
-//               };
-
-//               // SEPARAR por tiempo
-//               if (p.duracionMin && p.duracionMin > 0) {
-//                 pendienteInfo.prioridad = p.duracionMin > 60 ? "ALTA" :
-//                   p.duracionMin > 30 ? "MEDIA" : "BAJA";
-//                 tareasConTiempo[actividad.id].push(pendienteInfo);
-//                 revisionesPorActividad[actividad.id].pendientesConTiempo.push(pendienteInfo);
-//               } else {
-//                 pendienteInfo.prioridad = "SIN TIEMPO";
-//                 tareasSinTiempo[actividad.id].push(pendienteInfo);
-//                 revisionesPorActividad[actividad.id].pendientesSinTiempo.push(pendienteInfo);
-//               }
-//             });
-//           }
-//         });
-//       });
-//     }
-
-//     // 6️⃣ Calcular métricas para TODAS las actividades
-//     let totalTareasConTiempo = 0;
-//     let totalTareasSinTiempo = 0;
-//     let tareasAltaPrioridad = 0;
-//     let tiempoTotalEstimado = 0;
-//     let actividadesConTareas = 0;
-//     let actividadesSinTareas = 0;
-
-//     Object.keys(revisionesPorActividad).forEach(actividadId => {
-//       const actividad = revisionesPorActividad[actividadId];
-//       const tieneTareas = actividad.pendientesConTiempo.length > 0 || actividad.pendientesSinTiempo.length > 0;
-
-//       if (tieneTareas) {
-//         actividadesConTareas++;
-//       } else {
-//         actividadesSinTareas++;
-//       }
-
-//       totalTareasConTiempo += actividad.pendientesConTiempo.length;
-//       totalTareasSinTiempo += actividad.pendientesSinTiempo.length;
-//       tareasAltaPrioridad += actividad.pendientesConTiempo.filter(t => t.prioridad === "ALTA").length;
-//       tiempoTotalEstimado += actividad.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0);
-//     });
-
-//     const horasTotales = Math.floor(tiempoTotalEstimado / 60);
-//     const minutosTotales = tiempoTotalEstimado % 60;
-//     const totalTareas = totalTareasConTiempo + totalTareasSinTiempo;
-
-//     // 7️⃣ Construir prompt para TODAS las actividades (siempre)
-//     let prompt = `
-// Eres un asistente que analiza TODAS las actividades del día, enfocándote en el proyecto principal.
-// Usuario: ${user.firstName} (${email})
-// Proyecto principal del día: "${proyectoPrincipal}"
-
-// CONTEXTO COMPLETO:
-// ${mensajeHorario}
-// Total actividades: ${actividadesFiltradas.length}
-// - Actividades con tareas: ${actividadesConTareas}
-// - Actividades sin tareas: ${actividadesSinTareas}
-// Total tareas: ${totalTareas} 
-//   • Con tiempo: ${totalTareasConTiempo} tareas (${horasTotales}h ${minutosTotales}m)
-//   • Sin tiempo: ${totalTareasSinTiempo} tareas
-// Tareas alta prioridad: ${tareasAltaPrioridad}
-
-// PROYECTO PRINCIPAL (09:30-16:30): "${proyectoPrincipal}"
-
-// DETALLE COMPLETO DE ACTIVIDADES:
-// ${actividadesFiltradas.map((actividad, index) => {
-//   const revisiones = revisionesPorActividad[actividad.id] || { pendientesConTiempo: [], pendientesSinTiempo: [] };
-//   const conTiempo = revisiones.pendientesConTiempo;
-//   const sinTiempo = revisiones.pendientesSinTiempo;
-//   const esPrincipal = actividad.horaInicio === '09:30' && actividad.horaFin === '16:30';
-//   const indicadorPrincipal = esPrincipal ? " [PROYECTO PRINCIPAL]" : "";
-
-//   let actividadTexto = `
-// ${index + 1}. ${actividad.horaInicio} - ${actividad.horaFin} - ${actividad.titulo}${indicadorPrincipal}
-//    • Proyecto: ${actividad.tituloProyecto || "Sin proyecto"}
-//    • Estado: ${actividad.status}
-//    • Tareas: ${conTiempo.length + sinTiempo.length} (${conTiempo.length} con tiempo, ${sinTiempo.length} sin tiempo)`;
-
-//   if (conTiempo.length > 0) {
-//     actividadTexto += `
-//    • CON TIEMPO:`;
-//     conTiempo.forEach((tarea, i) => {
-//       actividadTexto += `
-//      ${i + 1}. ${tarea.nombre}
-//         - ${tarea.duracionMin} min | Prioridad: ${tarea.prioridad} | ${tarea.diasPendiente}d`;
-//     });
-//   }
-
-//   if (sinTiempo.length > 0) {
-//     actividadTexto += `
-//    • SIN TIEMPO:`;
-//     sinTiempo.forEach((tarea, i) => {
-//       actividadTexto += `
-//      ${i + 1}. ${tarea.nombre} (${tarea.diasPendiente}d)`;
-//     });
-//   }
-
-//   if (conTiempo.length === 0 && sinTiempo.length === 0) {
-//     actividadTexto += '\n   • Sin tareas pendientes';
-//   }
-
-//   return actividadTexto;
-// }).join('\n')}
-
-// PREGUNTA DEL USUARIO: "${question}"
-
-// INSTRUCCIONES ESTRICTAS DE RESPUESTA:
-// 1. COMIENZA mencionando siempre el proyecto principal: "Tu proyecto principal es '${proyectoPrincipal}'"
-// 2. Da un resumen general de TODAS tus actividades (${actividadesFiltradas.length} en total)
-// 3. Destaca especialmente las tareas del proyecto principal (${actividadPrincipal ? '09:30-16:30' : 'no encontrado'})
-// 4. Si hay tareas sin tiempo (${totalTareasSinTiempo}), sugiere estimarlas
-// 5. Recomienda priorizar las tareas de ALTA prioridad (${tareasAltaPrioridad})
-// 6. Da sugerencias específicas para el proyecto principal
-// 7. Termina con una pregunta práctica sobre cómo proceder
-// 8. Se natural, directo y enfocado en la productividad
-// 9. NO uses emojis ni formato especial
-// 10. MÁXIMO 8-10 líneas en total
-
-// EJEMPLO DE RESPUESTA:
-// "Tu proyecto principal es '${proyectoPrincipal}'. Tienes ${actividadesFiltradas.length} actividades hoy con ${totalTareas} tareas pendientes. Del proyecto principal, prioriza las ${revisionesPorActividad[actividadPrincipal?.id]?.pendientesConTiempo?.filter(t => t.prioridad === "ALTA").length || 0} tareas de alta prioridad. Tienes ${totalTareasSinTiempo} tareas sin tiempo que sería bueno estimar. Sugiero empezar con [tarea específica del proyecto principal] porque [razón]. ¿Quieres que te ayude a organizar tu día alrededor de '${proyectoPrincipal}'?"
-// `.trim();
-
-//     // 8️⃣ Obtener respuesta de IA
-//     const aiResult = await smartAICall(prompt);
-
-//     // ✅ Guardar respuesta del bot en historial
-//     await guardarMensajeHistorial(odooUserId, sessionId, "bot", aiResult.text);
-
-//     // 9️⃣ Preparar respuesta con TODAS las actividades
-//     let respuestaData = {
-//       actividades: actividadesFiltradas.map(a => ({
-//         id: a.id,
-//         titulo: a.titulo,
-//         horario: `${a.horaInicio} - ${a.horaFin}`,
-//         status: a.status,
-//         proyecto: a.tituloProyecto || "Sin proyecto",
-//         esPrincipal: a.horaInicio === '09:30' && a.horaFin === '16:30'
-//       })),
-//       revisionesPorActividad: actividadesFiltradas.map(actividad => {
-//         const revisionItem = revisionesPorActividad[actividad.id] || {
-//           pendientesConTiempo: [],
-//           pendientesSinTiempo: []
-//         };
-
-//         return {
-//           actividadId: actividad.id,
-//           actividadTitulo: actividad.titulo,
-//           actividadHorario: `${actividad.horaInicio} - ${actividad.horaFin}`,
-//           esPrincipal: actividad.horaInicio === '09:30' && actividad.horaFin === '16:30',
-//           proyecto: actividad.tituloProyecto || "Sin proyecto",
-//           tareasConTiempo: revisionItem.pendientesConTiempo || [],
-//           tareasSinTiempo: revisionItem.pendientesSinTiempo || [],
-//           totalTareas: (revisionItem.pendientesConTiempo?.length || 0) + 
-//                      (revisionItem.pendientesSinTiempo?.length || 0),
-//           tareasAltaPrioridad: (revisionItem.pendientesConTiempo || [])
-//                              .filter(t => t.prioridad === "ALTA").length,
-//           tiempoTotal: (revisionItem.pendientesConTiempo || [])
-//                      .reduce((sum, t) => sum + (t.duracionMin || 0), 0)
-//         };
-//       })
-//     };
-
-//     // 🔟 Respuesta completa
-//     return res.json({
-//       success: true,
-//       answer: aiResult.text,
-//       provider: aiResult.provider,
-//       sessionId: sessionId,
-//       proyectoPrincipal: proyectoPrincipal,
-//       metrics: {
-//         totalActividades: actividadesFiltradas.length,
-//         actividadesConTareas: actividadesConTareas,
-//         actividadesSinTareas: actividadesSinTareas,
-//         tareasConTiempo: totalTareasConTiempo,
-//         tareasSinTiempo: totalTareasSinTiempo,
-//         tareasAltaPrioridad: tareasAltaPrioridad,
-//         tiempoEstimadoTotal: `${horasTotales}h ${minutosTotales}m`
-//       },
-//       data: respuestaData,
-//       separadasPorTiempo: true,
-//       filtroAplicado: "NINGUNO (todas las actividades)",
-//       sugerencias: [
-//         `¿Te gustaría estimar tiempo para las ${totalTareasSinTiempo} tareas sin tiempo?`,
-//         `¿Quieres enfocarte solo en las tareas del proyecto '${proyectoPrincipal}'?`,
-//         "¿Necesitas ayuda para priorizar las tareas de alta prioridad?",
-//         `¿Quieres ver las tareas agrupadas por actividad o por prioridad?`
-//       ]
-//     });
-
-//   } catch (error) {
-//     if (error.message === "AI_PROVIDER_FAILED") {
-//       return res.status(503).json({
-//         success: false,
-//         message: "El asistente está muy ocupado. Intenta de nuevo en un minuto."
-//       });
-//     }
-
-//     if (isGeminiQuotaError(error)) {
-//       return res.status(429).json({
-//         success: false,
-//         reason: "QUOTA_EXCEEDED",
-//         message: "El asistente está temporalmente saturado."
-//       });
-//     }
-
-//     console.error("Error:", error);
-//     return res.status(500).json({
-//       success: false,
-//       message: "Error interno"
-//     });
-//   }
-// }
-async function obtenerYProcesarActividades(email, question, sessionId) {
-  try {
-    const showAll = question.toLowerCase().includes("todos") ||
-      question.toLowerCase().includes("todas") ||
-      question.toLowerCase().includes("otros horarios");
-
-    const usersData = await getAllUsers();
-    const user = usersData.items.find(
-      (u) => u.email.toLowerCase() === email.toLowerCase()
-    );
-
-    if (!user) {
-      throw new Error('Usuario no encontrado');
-    }
-
-    // Obtener actividades del día
-    const actividadesResponse = await axios.get(
-      `${urlApi}/actividades/assignee/${email}/del-dia`
-    );
-
-    const actividadesRaw = actividadesResponse.data.data;
-
-    if (!Array.isArray(actividadesRaw) || actividadesRaw.length === 0) {
-      return {
-        answer: "No tienes actividades registradas para hoy",
-        provider: "system",
-        proyectoPrincipal: "Sin proyecto",
-        metrics: {
-          totalActividades: 0,
-          tareasConTiempo: 0,
-          tareasSinTiempo: 0,
-          tareasAltaPrioridad: 0,
-          tiempoEstimadoTotal: "0h 0m"
-        },
-        data: {
-          actividades: [],
-          revisionesPorActividad: []
-        },
-        sugerencias: [
-          "¿Quieres revisar actividades de otro día?",
-          "¿Necesitas ayuda para crear nuevas actividades?",
-          "¿Tienes proyectos pendientes sin asignar?"
-        ]
-      };
-    }
-
-    // 🔍 OBTENER PROYECTO PRINCIPAL
-    const actividadPrincipal = actividadesRaw.find(a =>
-      a.horaInicio === '09:30' && a.horaFin === '16:30'
-    );
-
-    let proyectoPrincipal = "Sin proyecto específico";
-    if (actividadPrincipal) {
-      if (actividadPrincipal.tituloProyecto && actividadPrincipal.tituloProyecto !== "Sin proyecto") {
-        proyectoPrincipal = actividadPrincipal.tituloProyecto;
-      } else if (actividadPrincipal.titulo) {
-        const tituloLimpio = actividadPrincipal.titulo
-          .replace('analizador de pendientes 00act', '')
-          .replace('anfeta', '')
-          .trim();
-        proyectoPrincipal = tituloLimpio || actividadPrincipal.titulo.substring(0, 50) + "...";
-      }
-    }
-
-    // FILTRAR actividades
-    let actividadesFiltradas = [];
-    let mostrarSoloConTiempo = true;
-
-    if (showAll) {
-      actividadesFiltradas = actividadesRaw;
-      mostrarSoloConTiempo = false;
-    } else {
-      actividadesFiltradas = actividadesRaw.filter((a) => {
-        return a.horaInicio === '09:30' && a.horaFin === '16:30';
-      });
-    }
-
-    // Si no hay actividades en horario principal pero sí hay otras
-    if (actividadesFiltradas.length === 0 && actividadesRaw.length > 0) {
-      actividadesFiltradas = actividadesRaw;
-      mostrarSoloConTiempo = false;
-    }
-
-    // Extraer IDs de actividades
-    const actividadIds = actividadesFiltradas.map(a => a.id);
-
-    // Obtener revisiones del día
-    const today = new Date();
-    const formattedToday = today.toISOString().split('T')[0];
-
-    let todasRevisiones = { colaboradores: [] };
-    try {
-      const revisionesResponse = await axios.get(
-        `${urlApi}/reportes/revisiones-por-fecha`,
-        {
-          params: {
-            date: formattedToday,
-            colaborador: email
-          }
-        }
-      );
-
-      if (revisionesResponse.data?.success) {
-        todasRevisiones = revisionesResponse.data.data || { colaboradores: [] };
-      }
-    } catch (error) {
-      console.warn("Error obteniendo revisiones:", error.message);
-    }
-
-    // 4️⃣ Organizar revisiones por actividad
-    const revisionesPorActividad = {};
-
-    actividadesFiltradas.forEach(actividad => {
-      revisionesPorActividad[actividad.id] = {
-        actividad: {
-          id: actividad.id,
-          titulo: actividad.titulo,
-          horaInicio: actividad.horaInicio,
-          horaFin: actividad.horaFin,
-          status: actividad.status,
-          proyecto: actividad.tituloProyecto
-        },
-        pendientesConTiempo: [],
-        pendientesSinTiempo: []
-      };
-    });
-
-    // Procesar revisiones - SEPARAR por tiempo
-    if (todasRevisiones.colaboradores && Array.isArray(todasRevisiones.colaboradores)) {
-      todasRevisiones.colaboradores.forEach(colaborador => {
-        (colaborador.items?.actividades ?? []).forEach(actividad => {
-          if (actividadIds.includes(actividad.id) && actividad.pendientes) {
-            (actividad.pendientes ?? []).forEach(p => {
-              const estaAsignado = p.assignees?.some(a => a.name === email);
-              if (!estaAsignado) return;
-
-              const pendienteInfo = {
-                id: p.id,
-                nombre: p.nombre,
-                terminada: p.terminada,
-                confirmada: p.confirmada,
-                duracionMin: p.duracionMin || 0,
-                fechaCreacion: p.fechaCreacion,
-                fechaFinTerminada: p.fechaFinTerminada,
-                diasPendiente: p.fechaCreacion ?
-                  Math.floor((new Date() - new Date(p.fechaCreacion)) / (1000 * 60 * 60 * 24)) : 0
-              };
-
-              // SEPARAR por tiempo
-              if (p.duracionMin && p.duracionMin > 0) {
-                pendienteInfo.prioridad = p.duracionMin > 60 ? "ALTA" :
-                  p.duracionMin > 30 ? "MEDIA" : "BAJA";
-                revisionesPorActividad[actividad.id].pendientesConTiempo.push(pendienteInfo);
-              } else {
-                pendienteInfo.prioridad = "SIN TIEMPO";
-                revisionesPorActividad[actividad.id].pendientesSinTiempo.push(pendienteInfo);
-              }
-            });
-          }
-        });
-      });
-    }
-
-    // 5️⃣ Calcular métricas
-    let totalTareasConTiempo = 0;
-    let totalTareasSinTiempo = 0;
-    let tareasAltaPrioridad = 0;
-    let tiempoTotalEstimado = 0;
-
-    Object.keys(revisionesPorActividad).forEach(actividadId => {
-      const actividad = revisionesPorActividad[actividadId];
-      totalTareasConTiempo += actividad.pendientesConTiempo.length;
-      totalTareasSinTiempo += actividad.pendientesSinTiempo.length;
-      tareasAltaPrioridad += actividad.pendientesConTiempo.filter(t => t.prioridad === "ALTA").length;
-      tiempoTotalEstimado += actividad.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0);
-    });
-
-    const horasTotales = Math.floor(tiempoTotalEstimado / 60);
-    const minutosTotales = tiempoTotalEstimado % 60;
-    const totalTareas = totalTareasConTiempo + totalTareasSinTiempo;
-
-    // 6️⃣ Construir prompt para IA
-    let prompt = "";
-
-    if (showAll || !mostrarSoloConTiempo) {
-      // Prompt para mostrar TODAS
-      prompt = `
-Eres un asistente que analiza todas las actividades del día.
-Usuario: ${user.firstName} (${email})
-Proyecto principal asignado: "${proyectoPrincipal}"
-
-Contexto: Mostrando todas las actividades del día.
-
-Total actividades: ${actividadesFiltradas.length}
-Total tareas: ${totalTareas} (${totalTareasConTiempo} con tiempo, ${totalTareasSinTiempo} sin tiempo)
-Tiempo estimado: ${horasTotales}h ${minutosTotales}m
-
-PROYECTO PRINCIPAL:
-"${proyectoPrincipal}"
-
-DETALLE DE ACTIVIDADES:
-${actividadesFiltradas.map((actividad, index) => {
-        const revisiones = revisionesPorActividad[actividad.id] || { pendientesConTiempo: [], pendientesSinTiempo: [] };
-        const conTiempo = revisiones.pendientesConTiempo;
-        const sinTiempo = revisiones.pendientesSinTiempo;
-        const esPrincipal = actividad.horaInicio === '09:30' && actividad.horaFin === '16:30';
-        const indicadorPrincipal = esPrincipal ? " [PROYECTO PRINCIPAL]" : "";
-
-        let actividadTexto = `
-${index + 1}. ${actividad.horaInicio} - ${actividad.horaFin} - ${actividad.titulo}${indicadorPrincipal}
-   • Proyecto: ${actividad.tituloProyecto || "Sin proyecto"}
-   • Estado: ${actividad.status}
-   • Tareas: ${conTiempo.length + sinTiempo.length} (${conTiempo.length} con tiempo, ${sinTiempo.length} sin tiempo)`;
-
-        if (conTiempo.length > 0) {
-          actividadTexto += `
-   • CON TIEMPO:`;
-          conTiempo.forEach((tarea, i) => {
-            actividadTexto += `
-     ${i + 1}. ${tarea.nombre} - ${tarea.duracionMin}min (${tarea.prioridad}, ${tarea.diasPendiente}d)`;
-          });
-        }
-
-        if (sinTiempo.length > 0) {
-          actividadTexto += `
-   • SIN TIEMPO:`;
-          sinTiempo.forEach((tarea, i) => {
-            actividadTexto += `
-     ${i + 1}. ${tarea.nombre} (${tarea.diasPendiente}d pendiente)`;
-          });
-        }
-
-        return actividadTexto;
-      }).join('\n')}
-
-PREGUNTA DEL USUARIO: "${question}"
-
-INSTRUCCIONES DE RESPUESTA:
-1. Comienza mencionando el proyecto principal
-2. Da un resumen general de las actividades
-3. Destaca las tareas más importantes o urgentes
-4. Ofrece recomendaciones específicas
-5. Haz una pregunta de seguimiento
-6. Sé natural y directo
-7. NO uses emojis
-`.trim();
-    } else {
-      // Prompt solo para tareas con tiempo
-      prompt = `
-Eres un asistente que analiza actividades del día con tiempo asignado.
-Usuario: ${user.firstName} (${email})
-Proyecto principal: "${proyectoPrincipal}"
-
-TAREAS CON TIEMPO ASIGNADO:
-Total: ${totalTareasConTiempo} tareas | Tiempo total: ${horasTotales}h ${minutosTotales}m
-Tareas alta prioridad: ${tareasAltaPrioridad}
-
-${Object.values(revisionesPorActividad).flatMap(act =>
-        act.pendientesConTiempo.map(r =>
-          `• ${r.nombre} - ${r.duracionMin}min (${r.prioridad}, ${r.diasPendiente}d)`
-        )
-      ).join('\n')}
-
-PREGUNTA: "${question}"
-
-INSTRUCCIONES DE RESPUESTA:
-1. Enfócate en el proyecto principal: "${proyectoPrincipal}"
-2. Recomienda prioridades basadas en tiempo y urgencia
-3. Sé conciso (máximo 4 líneas)
-4. Termina con una pregunta sobre la siguiente acción
-5. SIN emojis ni formato especial
-`.trim();
-    }
-
-    // 7️⃣ Obtener respuesta de IA
-    const aiResult = await smartAICall(prompt);
-
-    // 8️⃣ Preparar datos estructurados
-    const actividadesEstructuradas = actividadesFiltradas.map(a => ({
-      id: a.id,
-      titulo: a.titulo,
-      horario: `${a.horaInicio} - ${a.horaFin}`,
-      status: a.status,
-      proyecto: a.tituloProyecto || "Sin proyecto",
-      esPrincipal: a.horaInicio === '09:30' && a.horaFin === '16:30'
-    }));
-
-    const revisionesEstructuradas = Object.values(revisionesPorActividad)
-      .filter(item => item.pendientesConTiempo.length > 0 || item.pendientesSinTiempo.length > 0)
-      .map(item => ({
-        actividadId: item.actividad.id,
-        actividadTitulo: item.actividad.titulo,
-        tareasConTiempo: item.pendientesConTiempo,
-        tareasSinTiempo: item.pendientesSinTiempo,
-        totalTareas: item.pendientesConTiempo.length + item.pendientesSinTiempo.length,
-        tareasAltaPrioridad: item.pendientesConTiempo.filter(t => t.prioridad === "ALTA").length,
-        tiempoTotal: item.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0)
-      }));
-
-    // 9️⃣ Generar sugerencias contextuales
-    let sugerencias = [];
-
-    if (showAll || !mostrarSoloConTiempo) {
-      sugerencias = [
-        `¿Quieres estimar tiempo para las ${totalTareasSinTiempo} tareas sin tiempo?`,
-        `¿Quieres priorizar las tareas de alta prioridad?`,
-        "¿Necesitas ayuda para organizar tu día completo?",
-        `¿Quieres enfocarte solo en el proyecto '${proyectoPrincipal.substring(0, 30)}...'?`,
-        "¿Te ayudo a crear un horario detallado?"
-      ];
-    } else {
-      sugerencias = [
-        `¿Quieres profundizar en alguna tarea de '${proyectoPrincipal}'?`,
-        `¿Necesitas ayuda para organizar las tareas por tiempo?`,
-        "¿Quieres ver todas tus actividades del día?",
-        `¿Te ayudo a distribuir el tiempo de las ${totalTareasConTiempo} tareas?`,
-        "¿Hay alguna tarea específica que necesite más detalle?"
-      ];
-    }
-
-    // 🔟 Retornar objeto estructurado
-    return {
-      answer: aiResult.text,
-      provider: aiResult.provider,
-      proyectoPrincipal: proyectoPrincipal,
-      metrics: {
-        totalActividades: actividadesFiltradas.length,
-        tareasConTiempo: totalTareasConTiempo,
-        tareasSinTiempo: totalTareasSinTiempo,
-        tareasAltaPrioridad: tareasAltaPrioridad,
-        tiempoEstimadoTotal: `${horasTotales}h ${minutosTotales}m`
-      },
-      data: {
-        actividades: actividadesEstructuradas,
-        revisionesPorActividad: revisionesEstructuradas
-      },
-      sugerencias: sugerencias.slice(0, 5),
-      sessionId: sessionId
-    };
-
-  } catch (error) {
-    console.error("Error en obtenerYProcesarActividades:", error);
-
-    return {
-      answer: "Lo siento, hubo un error al obtener tus actividades. Por favor, intenta de nuevo.",
-      provider: "system",
-      proyectoPrincipal: "Error",
-      metrics: {
-        totalActividades: 0,
-        tareasConTiempo: 0,
-        tareasSinTiempo: 0,
-        tareasAltaPrioridad: 0,
-        tiempoEstimadoTotal: "0h 0m"
-      },
-      data: {
-        actividades: [],
-        revisionesPorActividad: []
-      },
-      sugerencias: [
-        "Intenta de nuevo en un momento",
-        "Verifica que tu email sea correcto",
-        "Contacta al administrador si el problema persiste"
-      ],
-      sessionId: sessionId
-    };
-  }
-}
 
 export async function getActividadesConRevisiones(req, res) {
   try {
@@ -2022,7 +22,6 @@ export async function getActividadesConRevisiones(req, res) {
         message: "El email es requerido"
       });
     }
-    const sessionId = `act_${email}_${Date.now()}`.replace(/[^a-zA-Z0-9_]/g, '_');
 
     const usersData = await getAllUsers();
     const user = usersData.items.find(
@@ -2033,13 +32,14 @@ export async function getActividadesConRevisiones(req, res) {
       return res.status(404).json({ error: 'Usuario no encontrado' });
     }
 
-    const { sessionUserId } = req.cookies;
-    const odooUserId = sessionUserId
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const odooUserId = decoded.id.toString();
 
-    // ✅ Guardar mensaje del usuario en historial
-    await guardarMensajeHistorial(odooUserId, sessionId, "usuario", question);
+    const sessionId = generarSessionIdDiario(odooUserId);
 
-    // 1️⃣ Obtener actividades del día para el usuario
+
+    // 1️ Obtener actividades del día para el usuario
     const actividadesResponse = await axios.get(
       `${urlApi}/actividades/assignee/${email}/del-dia`
     );
@@ -2049,8 +49,7 @@ export async function getActividadesConRevisiones(req, res) {
     if (!Array.isArray(actividadesRaw) || actividadesRaw.length === 0) {
       const respuestaSinActividades = "No tienes actividades registradas para hoy";
 
-      // ✅ Guardar respuesta del bot en historial
-      await guardarMensajeHistorial(odooUserId, sessionId, "bot", respuestaSinActividades);
+  
 
       return res.json({
         success: true,
@@ -2061,79 +60,11 @@ export async function getActividadesConRevisiones(req, res) {
       });
     }
 
-    // 🔍 OBTENER PROYECTO PRINCIPAL (actividad 09:30-16:30) - DINÁMICO
-    const actividadPrincipal = actividadesRaw.find(a =>
-      a.horaInicio === '09:30' && a.horaFin === '16:30'
-    );
-
-    // Extraer el nombre del proyecto principal DINÁMICAMENTE
-    let proyectoPrincipal = "Sin proyecto específico";
-    if (actividadPrincipal) {
-      if (actividadPrincipal.tituloProyecto && actividadPrincipal.tituloProyecto !== "Sin proyecto") {
-        proyectoPrincipal = actividadPrincipal.tituloProyecto;
-      } else if (actividadPrincipal.titulo) {
-        // Intentar extraer del título
-        const tituloLimpio = actividadPrincipal.titulo
-          .replace('analizador de pendientes 00act', '')
-          .replace('anfeta', '')
-          .trim();
-        proyectoPrincipal = tituloLimpio || actividadPrincipal.titulo.substring(0, 50) + "...";
-      }
-    }
-
-    // FILTRAR según el parámetro showAll
-    let actividadesFiltradas = [];
-    let mensajeHorario = "";
-    let mostrarSoloConTiempo = true;
-
-    if (question.includes("otros horarios") || showAll) {
-      // MOSTRAR TODAS las actividades del día
-      actividadesFiltradas = actividadesRaw;
-      mensajeHorario = "Mostrando todas las actividades del día";
-      mostrarSoloConTiempo = false;
-    } else {
-      // Filtrar SOLO la actividad con horario 09:30-16:30
-      actividadesFiltradas = actividadesRaw.filter((a) => {
-        return a.horaInicio === '09:30' && a.horaFin === '16:30';
-      });
-      mensajeHorario = "Actividades en horario 09:30-16:30";
-
-      if (actividadesFiltradas.length === 0) {
-        const respuestaSinHorario = "No tienes actividades programadas en el horario de 09:30 a 16:30";
-
-        // ✅ Guardar respuesta del bot en historial
-        await guardarMensajeHistorial(odooUserId, sessionId, "bot", respuestaSinHorario);
-
-        return res.json({
-          success: true,
-          answer: respuestaSinHorario,
-          sessionId: sessionId,
-          actividades: actividadesRaw.map(a => ({
-            id: a.id,
-            titulo: a.titulo,
-            horario: `${a.horaInicio} - ${a.horaFin}`,
-            status: a.status,
-            proyecto: a.tituloProyecto || "Sin proyecto"
-          })),
-          revisionesPorActividad: {},
-          proyectoPrincipal: proyectoPrincipal,
-          sugerencias: [
-            "¿Quieres ver todas tus actividades del día?",
-            "¿Necesitas ayuda con actividades en otros horarios?",
-            "¿Quieres que te ayude a planificar estas actividades?"
-          ]
-        });
-      }
-    }
-
-    // 2️⃣ Extraer IDs de todas las actividades filtradas
-    const actividadIds = actividadesFiltradas.map(a => a.id);
-
-    // 3️⃣ Obtener fecha actual para las revisiones
+    // 2️ Obtener fecha actual para las revisiones
     const today = new Date();
     const formattedToday = today.toISOString().split('T')[0];
 
-    // 4️⃣ Obtener TODAS las revisiones del día
+    // 3️ Obtener TODAS las revisiones del día
     let todasRevisiones = { colaboradores: [] };
     try {
       const revisionesResponse = await axios.get(
@@ -2153,34 +84,45 @@ export async function getActividadesConRevisiones(req, res) {
       console.warn("Error obteniendo revisiones:", error.message);
     }
 
-    // 5️⃣ Filtrar y organizar revisiones por actividad
-    const revisionesPorActividad = {};
-    const tareasConTiempo = {};
-    const tareasSinTiempo = {};
+    // 4️ Filtrar actividades: 
+    // - Excluir las que contienen "00ftf" en el título
+    // - Excluir las que tienen status "00sec"
+    let actividadesFiltradas = actividadesRaw.filter((actividad) => {
+      // Excluir actividades con "00ftf" en el título
+      const tiene00ftf = actividad.titulo.toLowerCase().includes('00ftf');
+      // Excluir actividades con status "00sec"
+      const es00sec = actividad.status === "00sec";
 
-    actividadesFiltradas.forEach(actividad => {
-      revisionesPorActividad[actividad.id] = {
-        actividad: {
-          id: actividad.id,
-          titulo: actividad.titulo,
-          horaInicio: actividad.horaInicio,
-          horaFin: actividad.horaFin,
-          status: actividad.status,
-          proyecto: actividad.tituloProyecto
-        },
-        pendientesConTiempo: [],
-        pendientesSinTiempo: []
-      };
-
-      tareasConTiempo[actividad.id] = [];
-      tareasSinTiempo[actividad.id] = [];
+      return !tiene00ftf && !es00sec;
     });
 
-    // Procesar revisiones - SEPARAR por tiempo
+    // 5️ Extraer IDs de todas las actividades filtradas
+    const actividadIds = actividadesFiltradas.map(a => a.id);
+
+    // 6️ Procesar revisiones y verificar qué actividades tienen tareas CON TIEMPO
+    const revisionesPorActividad = {};
+    const actividadesConRevisionesConTiempoIds = new Set(); // Para guardar IDs de actividades que SÍ tienen revisiones CON TIEMPO
+
+    // Procesar revisiones
     if (todasRevisiones.colaboradores && Array.isArray(todasRevisiones.colaboradores)) {
       todasRevisiones.colaboradores.forEach(colaborador => {
         (colaborador.items?.actividades ?? []).forEach(actividad => {
+          // Solo procesar actividades que están en nuestro filtro
           if (actividadIds.includes(actividad.id) && actividad.pendientes) {
+            // Inicializar estructura para esta actividad
+            revisionesPorActividad[actividad.id] = {
+              actividad: {
+                id: actividad.id,
+                titulo: actividad.titulo,
+                horaInicio: actividadesRaw.find(a => a.id === actividad.id)?.horaInicio || "00:00",
+                horaFin: actividadesRaw.find(a => a.id === actividad.id)?.horaFin || "00:00",
+                status: actividadesRaw.find(a => a.id === actividad.id)?.status || "Sin status",
+                proyecto: actividadesRaw.find(a => a.id === actividad.id)?.tituloProyecto || "Sin proyecto"
+              },
+              pendientesConTiempo: [],
+              pendientesSinTiempo: []
+            };
+
             (actividad.pendientes ?? []).forEach(p => {
               const estaAsignado = p.assignees?.some(a => a.name === email);
               if (!estaAsignado) return;
@@ -2197,15 +139,17 @@ export async function getActividadesConRevisiones(req, res) {
                   Math.floor((new Date() - new Date(p.fechaCreacion)) / (1000 * 60 * 60 * 24)) : 0
               };
 
-              // SEPARAR por tiempo
+              // SEPARAR por tiempo - SOLO guardamos las con tiempo para análisis
               if (p.duracionMin && p.duracionMin > 0) {
                 pendienteInfo.prioridad = p.duracionMin > 60 ? "ALTA" :
                   p.duracionMin > 30 ? "MEDIA" : "BAJA";
-                tareasConTiempo[actividad.id].push(pendienteInfo);
                 revisionesPorActividad[actividad.id].pendientesConTiempo.push(pendienteInfo);
+
+                // Marcar que esta actividad tiene al menos una revisión CON TIEMPO
+                actividadesConRevisionesConTiempoIds.add(actividad.id);
               } else {
+                // Las tareas sin tiempo las guardamos pero no las usamos para filtrar
                 pendienteInfo.prioridad = "SIN TIEMPO";
-                tareasSinTiempo[actividad.id].push(pendienteInfo);
                 revisionesPorActividad[actividad.id].pendientesSinTiempo.push(pendienteInfo);
               }
             });
@@ -2214,184 +158,269 @@ export async function getActividadesConRevisiones(req, res) {
       });
     }
 
-    // 6️⃣ Calcular métricas
+    // 7️ Filtrar actividades:
+    // - Que tengan revisiones CON TIEMPO
+    // - Que estén en horario laboral (09:00-17:30)
+    const actividadesFinales = actividadesFiltradas.filter(actividad => {
+      // Verificar si tiene revisiones CON TIEMPO
+      const tieneRevisionesConTiempo = actividadesConRevisionesConTiempoIds.has(actividad.id);
+      if (!tieneRevisionesConTiempo) return false;
+
+      // Verificar si está en horario laboral (09:00-17:30)
+      const horaInicio = parseInt(actividad.horaInicio.split(':')[0]);
+      const estaEnHorarioLaboral = horaInicio >= 9 && horaInicio <= 17;
+
+      return estaEnHorarioLaboral;
+    });
+
+    // Si no hay actividades que cumplan todos los criterios
+    if (actividadesFinales.length === 0) {
+      // Verificar qué criterios no se cumplen
+      const actividadesConTiempo = actividadesFiltradas.filter(a =>
+        actividadesConRevisionesConTiempoIds.has(a.id)
+      );
+
+      const actividadesHorarioLaboral = actividadesFiltradas.filter(a => {
+        const horaInicio = parseInt(a.horaInicio.split(':')[0]);
+        return horaInicio >= 9 && horaInicio <= 17;
+      });
+
+      let mensajeError = "";
+      if (actividadesConTiempo.length === 0) {
+        mensajeError = "No tienes actividades con tareas que tengan tiempo estimado para hoy.";
+      } else if (actividadesHorarioLaboral.length === 0) {
+        mensajeError = "No tienes actividades programadas en horario laboral (09:00-17:30).";
+      } else {
+        mensajeError = `Tienes ${actividadesConTiempo.length} actividades con tareas con tiempo, pero ninguna en horario laboral.`;
+      }
+
+      return res.json({
+        success: true,
+        answer: mensajeError,
+        sessionId: sessionId,
+        actividadesTotales: actividadesFiltradas.length,
+        actividadesConTiempo: actividadesConTiempo.length,
+        actividadesHorarioLaboral: actividadesHorarioLaboral.length,
+        actividadesFinales: 0,
+        // sugerencias: [
+        //   actividadesConTiempo.length > 0 ? `¿Quieres ver las ${actividadesConTiempo.length} actividades con tareas con tiempo (fuera de horario laboral)?` : "¿Quieres ver todas tus actividades programadas?",
+        //   "¿Necesitas ayuda para asignar tiempo a tus tareas pendientes?",
+        //   "¿Te gustaría revisar actividades de otros días?"
+        // ]
+      });
+    }
+
+    // 8️ Calcular métricas SOLO de actividades finales (con tiempo y en horario laboral)
     let totalTareasConTiempo = 0;
-    let totalTareasSinTiempo = 0;
+    let totalTareasSinTiempo = 0; // Solo para referencia, no se mostrarán
     let tareasAltaPrioridad = 0;
     let tiempoTotalEstimado = 0;
 
-    Object.keys(revisionesPorActividad).forEach(actividadId => {
-      const actividad = revisionesPorActividad[actividadId];
-      totalTareasConTiempo += actividad.pendientesConTiempo.length;
-      totalTareasSinTiempo += actividad.pendientesSinTiempo.length;
-      tareasAltaPrioridad += actividad.pendientesConTiempo.filter(t => t.prioridad === "ALTA").length;
-      tiempoTotalEstimado += actividad.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0);
+    actividadesFinales.forEach(actividad => {
+      const revisiones = revisionesPorActividad[actividad.id] || { pendientesConTiempo: [], pendientesSinTiempo: [] };
+      totalTareasConTiempo += revisiones.pendientesConTiempo.length;
+      totalTareasSinTiempo += revisiones.pendientesSinTiempo.length; // Solo para métricas
+      tareasAltaPrioridad += revisiones.pendientesConTiempo.filter(t => t.prioridad === "ALTA").length;
+      tiempoTotalEstimado += revisiones.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0);
     });
 
     const horasTotales = Math.floor(tiempoTotalEstimado / 60);
     const minutosTotales = tiempoTotalEstimado % 60;
-    const totalTareas = totalTareasConTiempo + totalTareasSinTiempo;
 
-    // 7️⃣ Construir prompt según el tipo de análisis
-    let prompt = "";
+    // OBTENER PROYECTO PRINCIPAL (de las actividades finales)
+    let proyectoPrincipal = "Sin proyecto específico";
+    if (actividadesFinales.length > 0) {
+      const actividadPrincipal = actividadesFinales[0]; // Tomar la primera
+      if (actividadPrincipal.tituloProyecto && actividadPrincipal.tituloProyecto !== "Sin proyecto") {
+        proyectoPrincipal = actividadPrincipal.tituloProyecto;
+      } else if (actividadPrincipal.titulo) {
+        // Intentar extraer del título
+        const tituloLimpio = actividadPrincipal.titulo
+          .replace('analizador de pendientes 00act', '')
+          .replace('anfeta', '')
+          .replace(/00\w+/g, '')
+          .trim();
+        proyectoPrincipal = tituloLimpio || actividadPrincipal.titulo.substring(0, 50) + "...";
+      }
+    }
 
-    if (question.includes("otros horarios") || showAll || !mostrarSoloConTiempo) {
-      // Prompt para mostrar TODAS las actividades
-      prompt = `
-Eres un asistente que analiza todas las actividades del día.
+    // 9️ Construir prompt enfocado SOLO en actividades con revisiones CON TIEMPO en horario laboral
+    const prompt = `
+Eres un asistente que analiza ÚNICAMENTE actividades que:
+1. Tienen revisiones CON TIEMPO estimado
+2. Están en horario laboral (09:00-17:30)
+3. Se han filtrado actividades 00ftf y status 00sec
+
 Usuario: ${user.firstName} (${email})
-Proyecto principal asignado: "${proyectoPrincipal}"
 
-Contexto: Mostrando todas las actividades del día, incluyendo las que tienen y no tienen tiempo estimado.
+RESUMEN DE ACTIVIDADES CON REVISIONES CON TIEMPO (09:00-17:30):
+• Total actividades: ${actividadesFinales.length}
+• Total tareas con tiempo: ${totalTareasConTiempo}
+• Tareas de alta prioridad: ${tareasAltaPrioridad}
+• Tiempo estimado total: ${horasTotales}h ${minutosTotales}m
 
-${mensajeHorario}
-Total actividades: ${actividadesFiltradas.length}
-Total tareas: ${totalTareas} (${totalTareasConTiempo} con tiempo, ${totalTareasSinTiempo} sin tiempo)
-Tiempo estimado de las tareas con tiempo: ${horasTotales}h ${minutosTotales}m
+DETALLE DE ACTIVIDADES (SOLO TAREAS CON TIEMPO):
+${actividadesFinales.map((actividad, index) => {
+      const revisiones = revisionesPorActividad[actividad.id] || { pendientesConTiempo: [], pendientesSinTiempo: [] };
+      const conTiempo = revisiones.pendientesConTiempo;
 
-PROYECTO PRINCIPAL DEL DÍA (09:30-16:30):
-"${proyectoPrincipal}"
-
-DETALLE DE ACTIVIDADES:
-${actividadesFiltradas.map((actividad, index) => {
-        const revisiones = revisionesPorActividad[actividad.id] || { pendientesConTiempo: [], pendientesSinTiempo: [] };
-        const conTiempo = revisiones.pendientesConTiempo;
-        const sinTiempo = revisiones.pendientesSinTiempo;
-        const esPrincipal = actividad.horaInicio === '09:30' && actividad.horaFin === '16:30';
-        const indicadorPrincipal = esPrincipal ? " [PROYECTO PRINCIPAL]" : "";
-
-        let actividadTexto = `
-${index + 1}. ${actividad.horaInicio} - ${actividad.horaFin} - ${actividad.titulo}${indicadorPrincipal}
+      let actividadTexto = `
+${index + 1}. ${actividad.horaInicio} - ${actividad.horaFin} - ${actividad.titulo}
    • Proyecto: ${actividad.tituloProyecto || "Sin proyecto"}
    • Estado: ${actividad.status}
-   • Total tareas: ${conTiempo.length + sinTiempo.length} (${conTiempo.length} con tiempo, ${sinTiempo.length} sin tiempo)`;
+   • Tareas con tiempo: ${conTiempo.length}`;
 
-        if (conTiempo.length > 0) {
+      if (conTiempo.length > 0) {
+        actividadTexto += `
+   • TIEMPO TOTAL: ${revisiones.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0)}min`;
+        conTiempo.forEach((tarea, i) => {
           actividadTexto += `
-   • TAREAS CON TIEMPO:`;
-          conTiempo.forEach((tarea, i) => {
-            actividadTexto += `
      ${i + 1}. ${tarea.nombre}
-        - ${tarea.duracionMin} min | Prioridad: ${tarea.prioridad} | Dias: ${tarea.diasPendiente}d`;
-          });
-        }
+        - ${tarea.duracionMin} min | Prioridad: ${tarea.prioridad} | Dias pendiente: ${tarea.diasPendiente}d`;
+        });
+      }
 
-        if (sinTiempo.length > 0) {
-          actividadTexto += `
-   • TAREAS SIN TIEMPO:`;
-          sinTiempo.forEach((tarea, i) => {
-            actividadTexto += `
-     ${i + 1}. ${tarea.nombre} (${tarea.diasPendiente}d pendiente)`;
-          });
-        }
+      // NO mencionar tareas sin tiempo en el prompt
+      if (revisiones.pendientesSinTiempo.length > 0) {
+        // Solo para información interna, no se muestra al usuario
+        actividadTexto += `\n   • [NOTA INTERNA: ${revisiones.pendientesSinTiempo.length} tareas sin tiempo - NO MOSTRAR AL USUARIO]`;
+      }
 
-        if (conTiempo.length === 0 && sinTiempo.length === 0) {
-          actividadTexto += '\n   • Sin tareas asignadas';
-        }
-
-        return actividadTexto;
-      }).join('\n')}
+      return actividadTexto;
+    }).join('\n')}
 
 PREGUNTA DEL USUARIO: "${question}"
 
 INSTRUCCIONES ESTRICTAS DE RESPUESTA:
-1. COMIENZA mencionando el proyecto principal: "Tu proyecto principal es '${proyectoPrincipal}'"
-2. Da un resumen general de todas las actividades mencionando el proyecto principal
-3. Diles si están al día o menciona pendientes importantes del proyecto principal
-4. Lista los puntos principales con viñetas relacionadas con el proyecto principal
-5. Al final da sugerencias específicas: "Te recomiendo que empieces con [lista de tareas DEL PROYECTO PRINCIPAL] porque [razón]"
-6. Pregunta si están de acuerdo con la sugerencia
-7. Se natural y directo
-8. NO uses emojis ni formato especial
-9. Relaciona TODO con el proyecto principal
+1. COMIENZA específicamente: "En tu horario laboral (09:00-17:30), tienes ${actividadesFinales.length} actividades con tareas que tienen tiempo estimado"
+2. ENFÓCATE EXCLUSIVAMENTE en las tareas CON TIEMPO (${totalTareasConTiempo} tareas)
+3. NO MENCIONES ni hagas referencia a tareas sin tiempo
+4. Para CADA actividad, menciona:
+   - Horario y nombre breve
+   - Número de tareas con tiempo
+   - Tiempo total estimado
+5. Da RECOMENDACIONES ESPECÍFICAS basadas en:
+   - Prioridad de tareas (ALTA primero)
+   - Tiempo total de cada actividad
+   - Horario disponible
+6. Sugiere un ORDEN DE EJECUCIÓN claro para el día laboral
+7. MÁXIMO 6-8 renglones
+8. SIN emojis
+9. EVITA mencionar "tareas sin tiempo", "sin estimación", etc.
 
 EJEMPLO DE RESPUESTA:
-"Tu proyecto principal es '${proyectoPrincipal}'. Estás al día con 4 actividades hoy.
-• Para tu proyecto principal tienes 4 tareas con tiempo asignado
-• Hay 13 tareas sin tiempo que requieren estimación
-• La tarea de alta prioridad está relacionada con el proyecto principal
-
-Sugerencia desde mi punto de vista: te recomiendo que empieces con la tarea de creación de rutas API de tu proyecto principal, después las correcciones y finalmente las pruebas de integración porque esta secuencia optimiza tu tiempo. ¿Estás de acuerdo?"
+"En tu horario laboral (09:00-17:30), tienes 2 actividades con tareas que tienen tiempo estimado. En 'ANFETA WL PRUEBAS RAPIDAS' (14:30-17:30) tienes 1 tarea de alta prioridad de 180min. En 'RESPALDO NOTION MIGRACION' (14:30-17:30) tienes la misma tarea de 180min. Te sugiero enfocarte en esta tarea de alta prioridad durante la tarde, ya que suma 6 horas entre ambas. ¿Quieres comenzar con esta tarea o prefieres dividirla?"
 `.trim();
-    } else {
-      // Prompt normal (solo tareas con tiempo) - CON PROYECTO PRINCIPAL
-      prompt = `
-Eres un asistente que analiza actividades del día con tiempo asignado.
-Usuario: ${user.firstName} (${email})
-Proyecto principal asignado: "${proyectoPrincipal}"
 
-TAREAS CON TIEMPO ASIGNADO para tu proyecto "${proyectoPrincipal}":
-Total: ${totalTareasConTiempo} tareas | Tiempo total: ${horasTotales}h ${minutosTotales}m
-Tareas alta prioridad: ${tareasAltaPrioridad}
-
-${Object.values(revisionesPorActividad).flatMap(act =>
-        act.pendientesConTiempo.map(r =>
-          `• ${r.nombre} - ${r.duracionMin}min (${r.prioridad}, ${r.diasPendiente}d)`
-        )
-      ).join('\n')}
-
-PREGUNTA: "${question}"
-
-INSTRUCCIONES ESTRICTAS DE RESPUESTA:
-1. COMIENZA mencionando el proyecto principal: "Para tu proyecto '${proyectoPrincipal}'"
-2. Enfócate SOLO en las tareas con tiempo asignado de este proyecto
-3. Da prioridad principal basada en el proyecto
-4. Recomendación breve relacionada con el proyecto
-5. Pregunta final corta relacionada con el proyecto
-6. MÁXIMO 4 renglones
-7. SIN emojis
-8. SIN formato especial
-
-EJEMPLO DE RESPUESTA:
-"Para tu proyecto '${proyectoPrincipal}', prioriza la creación de rutas API (80min, ALTA). Tienes 2h55m disponibles para este proyecto. ¿Por cuál tarea del proyecto quieres empezar?"
-`.trim();
-    }
-
-    // 8️⃣ Obtener respuesta de IA
+    //  Obtener respuesta de IA
     const aiResult = await smartAICall(prompt);
 
-    // ✅ Guardar respuesta del bot en historial
-    await guardarMensajeHistorial(odooUserId, sessionId, "bot", aiResult.text);
+  
 
-    // 9️⃣ Preparar respuesta según el tipo
-    let respuestaData = {
-      actividades: actividadesFiltradas.map(a => ({
+    // 1️.1 Preparar respuesta estructurada SOLO con actividades finales
+    const respuestaData = {
+      actividades: actividadesFinales.map(a => ({
         id: a.id,
         titulo: a.titulo,
         horario: `${a.horaInicio} - ${a.horaFin}`,
         status: a.status,
         proyecto: a.tituloProyecto || "Sin proyecto",
-        esPrincipal: a.horaInicio === '09:30' && a.horaFin === '16:30'
+        esHorarioLaboral: true, // Todas están en horario laboral por el filtro
+        tieneRevisionesConTiempo: true
       })),
-      revisionesPorActividad: {}
+      revisionesPorActividad: actividadesFinales
+        .map(actividad => {
+          const revisiones = revisionesPorActividad[actividad.id];
+          if (!revisiones || revisiones.pendientesConTiempo.length === 0) return null;
+
+          return {
+            actividadId: actividad.id,
+            actividadTitulo: actividad.titulo,
+            actividadHorario: `${actividad.horaInicio} - ${actividad.horaFin}`,
+            tareasConTiempo: revisiones.pendientesConTiempo, // SOLO tareas con tiempo
+            totalTareasConTiempo: revisiones.pendientesConTiempo.length,
+            tareasAltaPrioridad: revisiones.pendientesConTiempo.filter(t => t.prioridad === "ALTA").length,
+            tiempoTotal: revisiones.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0),
+            tiempoFormateado: `${Math.floor(revisiones.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0) / 60)}h ${revisiones.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0) % 60}m`
+            // NO incluimos tareasSinTiempo en la respuesta
+          };
+        })
+        .filter(item => item !== null) // Filtrar nulos
     };
 
-    if (question.includes("otros horarios") || showAll) {
-      respuestaData.revisionesPorActividad = Object.values(revisionesPorActividad)
-        .filter(item => item.pendientesConTiempo.length > 0 || item.pendientesSinTiempo.length > 0)
-        .map(item => ({
-          actividadId: item.actividad.id,
-          actividadTitulo: item.actividad.titulo,
-          tareasConTiempo: item.pendientesConTiempo,
-          tareasSinTiempo: item.pendientesSinTiempo,
-          totalTareas: item.pendientesConTiempo.length + item.pendientesSinTiempo.length,
-          tareasAltaPrioridad: item.pendientesConTiempo.filter(t => t.prioridad === "ALTA").length,
-          tiempoTotal: item.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0)
-        }));
-    } else {
-      respuestaData.revisionesPorActividad = Object.values(revisionesPorActividad)
-        .filter(item => item.pendientesConTiempo.length > 0)
-        .map(item => ({
-          actividadId: item.actividad.id,
-          actividadTitulo: item.actividad.titulo,
-          pendientesPlanificados: item.pendientesConTiempo.length,
-          pendientesAlta: item.pendientesConTiempo.filter(p => p.prioridad === "ALTA").length,
-          tiempoTotal: item.pendientesConTiempo.reduce((sum, p) => sum + (p.duracionMin || 0), 0),
-          pendientes: item.pendientesConTiempo
-        }));
-    }
+    // ✅ GUARDAR EN HISTORIAL - Registrar tareas conocidas y mensaje del bot
+const analisisCompleto = {
+  success: true,
+  answer: aiResult.text,
+  provider: aiResult.provider,
+  sessionId: sessionId,
+  proyectoPrincipal: proyectoPrincipal,
+  metrics: {
+    totalActividades: actividadesFiltradas.length,
+    totalPendientes: totalTareasConTiempo,
+    pendientesAltaPrioridad: tareasAltaPrioridad,
+    tiempoEstimadoTotal: `${horasTotales}h ${minutosTotales}m`,
+    actividadesConPendientes: actividadesFinales.length,
+    tareasConTiempo: totalTareasConTiempo,
+    tareasSinTiempo: totalTareasSinTiempo,
+    tareasAltaPrioridad: tareasAltaPrioridad
+  },
+  data: respuestaData,
+  separadasPorTiempo: true,
+  sugerencias: []
+};
 
-    // 🔟 Respuesta completa
+// Construir tareasEstado desde las revisiones
+const tareasEstadoArray = respuestaData.revisionesPorActividad.flatMap(r =>
+  (r.tareasConTiempo || []).map(t => ({
+    taskId: t.id,
+    taskName: t.nombre,
+    actividadTitulo: r.actividadTitulo,
+    explicada: false,
+    validada: false,
+    explicacion: "",
+    ultimoIntento: null
+  }))
+);
+
+// Guardar historial con mensaje del usuario, respuesta del bot y tareas conocidas
+await HistorialBot.findOneAndUpdate(
+  { userId: odooUserId, sessionId },
+  {
+    $setOnInsert: {
+      userId: odooUserId,
+      sessionId
+    },
+    $set: {
+      tareasEstado: tareasEstadoArray,
+      ultimoAnalisis: analisisCompleto,
+      estadoConversacion: "mostrando_actividades"
+    },
+    $push: {
+      mensajes: {
+        $each: [
+          {
+            role: "usuario",
+            contenido: question,
+            timestamp: new Date(),
+            tipoMensaje: "texto",
+            analisis: null
+          },
+          {
+            role: "bot",
+            contenido: aiResult.text,
+            timestamp: new Date(),
+            tipoMensaje: "analisis_inicial",
+            analisis: analisisCompleto
+          }
+        ]
+      }
+    }
+  },
+  { upsert: true, new: true }
+);
+
+    // 1️.2 Respuesta completa
     return res.json({
       success: true,
       answer: aiResult.text,
@@ -2399,23 +428,29 @@ EJEMPLO DE RESPUESTA:
       sessionId: sessionId,
       proyectoPrincipal: proyectoPrincipal,
       metrics: {
-        totalActividades: actividadesFiltradas.length,
+        totalActividadesProgramadas: actividadesFiltradas.length,
+        actividadesConTiempoTotal: Array.from(actividadesConRevisionesConTiempoIds).length,
+        actividadesFinales: actividadesFinales.length,
         tareasConTiempo: totalTareasConTiempo,
-        tareasSinTiempo: totalTareasSinTiempo,
         tareasAltaPrioridad: tareasAltaPrioridad,
-        tiempoEstimadoTotal: `${horasTotales}h ${minutosTotales}m`
+        tiempoEstimadoTotal: `${horasTotales}h ${minutosTotales}m`,
+        // NOTA: No incluimos métricas de tareas sin tiempo
       },
       data: respuestaData,
-      separadasPorTiempo: true,
-      sugerencias: question.includes("otros horarios") || showAll ? [
-        `¿Te gustaría estimar tiempo para las ${totalTareasSinTiempo} tareas sin tiempo de '${proyectoPrincipal}'?`,
-        `¿Quieres que te ayude a priorizar las tareas de '${proyectoPrincipal}'?`,
-        "¿Necesitas ayuda para organizar tu día completo?"
-      ] : [
-        `¿Quieres profundizar en alguna tarea de '${proyectoPrincipal}'?`,
-        `¿Necesitas ayuda para organizar las tareas de '${proyectoPrincipal}' por tiempo?`,
-        "¿Quieres ver todas tus actividades del día?"
-      ]
+      multiActividad: true,
+      filtrosAplicados: {
+        excluir00ftf: true,
+        excluir00sec: true,
+        soloHorarioLaboral: "09:00-17:30",
+        soloTareasConTiempo: true,
+        excluirTareasSinTiempo: true
+      }
+      // sugerencias: [
+      //   `¿Quieres ver las ${Array.from(actividadesConRevisionesConTiempoIds).length} actividades con tareas con tiempo (incluyendo fuera de horario)?`,
+      //   `¿Te gustaría estimar tiempo para las ${totalTareasSinTiempo} tareas sin tiempo?`,
+      //   "¿Quieres priorizar solo las tareas de alta prioridad?",
+      //   "¿Necesitas ayuda para organizar mejor tu tiempo?"
+      // ]
     });
 
   } catch (error) {
@@ -2441,543 +476,21 @@ EJEMPLO DE RESPUESTA:
     });
   }
 }
-/**
- * Función 2 - Versión local simplificada para pruebas
- * Solo procesa 2 tareas de ejemplo sin conexiones externas
- */
-export async function getActividadesLocal(req, res) {
-  try {
-    const { email, question = "¿Qué tengo pendiente hoy?" } = req.body;
 
-    if (!email) {
-      return res.status(400).json({
-        success: false,
-        message: "El email es requerido"
-      });
-    }
-
-    // ID de sesión simple
-    const sessionId = `local_${Date.now()}`;
-
-    // 1. Datos de usuario local (simulado)
-    const usuarioLocal = {
-      id: 1,
-      email: email,
-      firstName: "Usuario",
-      lastName: "Demo",
-      role: "developer"
-    };
-
-    // 2. Actividades locales fijas (solo 2)
-    const actividadesLocales = [
-      {
-        id: 101,
-        titulo: "Revisar documentación técnica",
-        horaInicio: "09:00",
-        horaFin: "10:30",
-        status: "Pendiente",
-        tituloProyecto: "Proyecto Local Alpha"
-      },
-      {
-        id: 102,
-        titulo: "Corregir errores en formulario",
-        horaInicio: "11:00",
-        horaFin: "12:00",
-        status: "En progreso",
-        tituloProyecto: "Proyecto Local Beta"
-      }
-    ];
-
-    // 3. Revisiones locales fijas (asociadas a las 2 actividades)
-    const fechaAyer = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-
-    const revisionesLocales = {
-      colaboradores: [
-        {
-          items: {
-            actividades: [
-              {
-                id: 101,
-                pendientes: [
-                  {
-                    id: 201,
-                    nombre: "Revisar API endpoints",
-                    terminada: false,
-                    confirmada: false,
-                    duracionMin: 45,
-                    fechaCreacion: fechaAyer,
-                    assignees: [{ name: email }]
-                  },
-                  {
-                    id: 202,
-                    nombre: "Actualizar diagramas",
-                    terminada: true,
-                    confirmada: true,
-                    duracionMin: 30,
-                    fechaCreacion: fechaAyer,
-                    assignees: [{ name: email }]
-                  }
-                ]
-              },
-              {
-                id: 102,
-                pendientes: [
-                  {
-                    id: 203,
-                    nombre: "Validar inputs del formulario",
-                    terminada: false,
-                    confirmada: false,
-                    duracionMin: 0, // Sin tiempo asignado
-                    fechaCreacion: fechaAyer,
-                    assignees: [{ name: email }]
-                  }
-                ]
-              }
-            ]
-          }
-        }
-      ]
-    };
-    // 4. Procesar revisiones para cada actividad
-    const revisionesPorActividad = {};
-
-    actividadesLocales.forEach(actividad => {
-      const actividadRevisiones = revisionesLocales.colaboradores[0].items.actividades
-        .find(a => a.id === actividad.id);
-
-      revisionesPorActividad[actividad.id] = {
-        actividad: {
-          id: actividad.id,
-          titulo: actividad.titulo,
-          horaInicio: actividad.horaInicio,
-          horaFin: actividad.horaFin,
-          status: actividad.status,
-          proyecto: actividad.tituloProyecto
-        },
-        pendientesConTiempo: [],
-        pendientesSinTiempo: []
-      };
-
-      if (actividadRevisiones && actividadRevisiones.pendientes) {
-        actividadRevisiones.pendientes.forEach(pendiente => {
-          const pendienteInfo = {
-            id: pendiente.id,
-            nombre: pendiente.nombre,
-            terminada: pendiente.terminada,
-            confirmada: pendiente.confirmada,
-            duracionMin: pendiente.duracionMin || 0,
-            fechaCreacion: pendiente.fechaCreacion,
-            diasPendiente: pendiente.fechaCreacion ?
-              Math.floor((new Date() - new Date(pendiente.fechaCreacion)) / (1000 * 60 * 60 * 24)) : 0
-          };
-
-          if (pendiente.duracionMin && pendiente.duracionMin > 0) {
-            pendienteInfo.prioridad = pendiente.duracionMin > 60 ? "ALTA" :
-              pendiente.duracionMin > 30 ? "MEDIA" : "BAJA";
-            revisionesPorActividad[actividad.id].pendientesConTiempo.push(pendienteInfo);
-          } else {
-            pendienteInfo.prioridad = "SIN TIEMPO";
-            revisionesPorActividad[actividad.id].pendientesSinTiempo.push(pendienteInfo);
-          }
-        });
-      }
-    });
-
-    // 5. Calcular métricas simples
-    let totalTareasConTiempo = 0;
-    let totalTareasSinTiempo = 0;
-    let tiempoTotalEstimado = 0;
-
-    Object.values(revisionesPorActividad).forEach(actividad => {
-      totalTareasConTiempo += actividad.pendientesConTiempo.length;
-      totalTareasSinTiempo += actividad.pendientesSinTiempo.length;
-      tiempoTotalEstimado += actividad.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0);
-    });
-
-    const horasTotales = Math.floor(tiempoTotalEstimado / 60);
-    const minutosTotales = tiempoTotalEstimado % 60;
-
-    // 6. Respuesta local sin IA
-    const respuestaLocal = `
-Hola ${usuarioLocal.firstName},
-
-Tienes 2 actividades locales programadas para hoy:
-
-1. Revisar documentación técnica (09:00-10:30)
-   • 2 tareas: 1 pendiente (45min), 1 completada
-
-2. Corregir errores en formulario (11:00-12:00)
-   • 1 tarea sin tiempo estimado
-
-Total: ${totalTareasConTiempo} tareas con tiempo (${horasTotales}h ${minutosTotales}m), 
-${totalTareasSinTiempo} tareas sin tiempo.
-
-¿En qué actividad te gustaría enfocarte primero?
-    `.trim();
-
-    // 7. Devolver respuesta estructurada
-    return res.json({
-      success: true,
-      answer: respuestaLocal,
-      sessionId: sessionId,
-      source: "local_demo",
-      metrics: {
-        totalActividades: actividadesLocales.length,
-        tareasConTiempo: totalTareasConTiempo,
-        tareasSinTiempo: totalTareasSinTiempo,
-        tiempoEstimadoTotal: `${horasTotales}h ${minutosTotales}m`
-      },
-      data: {
-        actividades: actividadesLocales.map(a => ({
-          id: a.id,
-          titulo: a.titulo,
-          horario: `${a.horaInicio} - ${a.horaFin}`,
-          status: a.status,
-          proyecto: a.tituloProyecto
-        })),
-        revisionesPorActividad: Object.values(revisionesPorActividad).map(item => ({
-          actividadId: item.actividad.id,
-          actividadTitulo: item.actividad.titulo,
-          tareasConTiempo: item.pendientesConTiempo,
-          tareasSinTiempo: item.pendientesSinTiempo,
-          totalTareas: item.pendientesConTiempo.length + item.pendientesSinTiempo.length
-        }))
-      },
-      sugerencias: [
-        "¿Quieres marcar alguna tarea como completada?",
-        "¿Necesitas agregar tiempo estimado a las tareas sin tiempo?",
-        "¿Quieres ver más detalles de alguna actividad?"
-      ],
-      nota: "Esta es una versión local de demostración con datos fijos"
-    });
-
-  } catch (error) {
-    console.error("Error en función local:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Error en función local",
-      error: error.message
-    });
-  }
-}
-// MEJORADA: Obtener actividades con más datos para sugerencias
-async function obtenerActividadesYRevisiones(email) {
-  try {
-    const actividadesResponse = await axios.get(`${urlApi}/actividades/assignee/${email}/del-dia`);
-    const actividadesRaw = actividadesResponse.data.data || [];
-
-    // Obtener métricas básicas
-    let totalTareas = 0;
-    let tareasConTiempo = 0;
-    let tareasSinTiempo = 0;
-    let tareasAltaPrioridad = 0;
-    let proyectoPrincipal = "Sin proyecto específico";
-
-    // Buscar proyecto principal
-    const actividadPrincipal = actividadesRaw.find(a => a.horaInicio === '09:30' && a.horaFin === '16:30');
-    if (actividadPrincipal && actividadPrincipal.tituloProyecto) {
-      proyectoPrincipal = actividadPrincipal.tituloProyecto;
-    }
-
-    return {
-      actividades: actividadesRaw,
-      revisionesPorActividad: {},
-      metrics: {
-        totalTareas,
-        tareasConTiempo,
-        tareasSinTiempo,
-        tareasAltaPrioridad,
-        proyectoPrincipal
-      },
-      proyectoPrincipal: proyectoPrincipal
-    };
-  } catch (error) {
-    console.error("Error obteniendo actividades:", error);
-    return {
-      actividades: [],
-      revisionesPorActividad: {},
-      metrics: {
-        totalTareas: 0,
-        tareasConTiempo: 0,
-        tareasSinTiempo: 0,
-        tareasAltaPrioridad: 0,
-        proyectoPrincipal: "Sin proyecto"
-      },
-      proyectoPrincipal: "Sin proyecto"
-    };
-  }
-}
-
-export async function seleccionarSugerencia(req, res) {
-  try {
-    const { email, sessionId, suggestionIndex, suggestionText } = sanitizeObject(req.body);
-
-    if (!email || !sessionId || (suggestionIndex === undefined && !suggestionText)) {
-      return res.status(400).json({
-        success: false,
-        message: "Email, sessionId y suggestionIndex o suggestionText son requeridos"
-      });
-    }
-
-    // Verificar que la sesión existe
-    if (!conversaciones.has(sessionId)) {
-      return res.status(404).json({
-        success: false,
-        message: "Sesión no encontrada"
-      });
-    }
-
-    const contexto = conversaciones.get(sessionId);
-
-    // Verificar que el email coincide
-    if (contexto.email !== email) {
-      return res.status(403).json({
-        success: false,
-        message: "Email no coincide con la sesión"
-      });
-    }
-
-    let sugerenciaSeleccionada = suggestionText;
-
-    // Si se proporcionó índice, obtener el texto de la sugerencia
-    if (suggestionIndex !== undefined && contexto.ultimasSugerencias) {
-      const index = parseInt(suggestionIndex);
-      if (index >= 0 && index < contexto.ultimasSugerencias.length) {
-        sugerenciaSeleccionada = contexto.ultimasSugerencias[index];
-      }
-    }
-
-    if (!sugerenciaSeleccionada) {
-      return res.status(400).json({
-        success: false,
-        message: "Sugerencia no encontrada"
-      });
-    }
-
-    // Crear una nueva "conversación" usando la sugerencia como mensaje
-    const nuevoReq = {
-      body: {
-        email: email,
-        message: sugerenciaSeleccionada,
-        sessionId: sessionId,
-        selectedSuggestion: suggestionIndex
-      }
-    };
-
-    // Llamar a chatInteractivo con la sugerencia seleccionada
-    return chatInteractivo(nuevoReq, res);
-
-  } catch (error) {
-    console.error("Error en seleccionarSugerencia:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Error interno del servidor",
-      error: error.message
-    });
-  }
-}
-// NUEVA FUNCIÓN: Determinar tipo de sugerencia para mejor UI
-function determinarTipoSugerencia(sugerencia) {
-  const sugerenciaLower = sugerencia.toLowerCase();
-
-  if (sugerenciaLower.includes('profundizar') || sugerenciaLower.includes('detalle')) {
-    return 'DETAIL';
-  } else if (sugerenciaLower.includes('organizar') || sugerenciaLower.includes('planificar')) {
-    return 'ORGANIZE';
-  } else if (sugerenciaLower.includes('priorizar') || sugerenciaLower.includes('recomendar')) {
-    return 'PRIORITIZE';
-  } else if (sugerenciaLower.includes('ver todas') || sugerenciaLower.includes('mostrar')) {
-    return 'SHOW_ALL';
-  } else if (sugerenciaLower.includes('tiempo') || sugerenciaLower.includes('estim')) {
-    return 'TIME_MANAGEMENT';
-  } else if (sugerenciaLower.includes('ayuda') || sugerenciaLower.includes('asistencia')) {
-    return 'HELP';
-  } else {
-    return 'GENERAL';
-  }
-}
-// MEJORADA: Generar sugerencias con más contexto
-function generarSugerencias(estado, contexto = null) {
-  const sugerenciasBase = {
-    inicio: [
-      "Pregúntame sobre tus actividades de hoy",
-      "¿Qué necesitas revisar primero?",
-      "¿Quieres que te ayude a priorizar tareas?"
-    ],
-    tiene_datos: [
-      "¿Quieres profundizar en algún pendiente específico?",
-      "¿Necesitas recomendaciones técnicas?",
-      "¿Te ayudo a planificar el tiempo de cada tarea?"
-    ],
-    esperando_respuesta: [
-      "Responde a mi pregunta anterior",
-      "¿Necesitas más detalles sobre algo?",
-      "¿Quieres cambiar de tema?"
-    ],
-    dando_recomendaciones: [
-      "¿Te sirvió la recomendación?",
-      "¿Quieres otra perspectiva?",
-      "¿Necesitas ayuda para implementarlo?"
-    ],
-    revisando_tareas: [
-      "¿Quieres ver los detalles de esta tarea?",
-      "¿Necesitas desglosar el tiempo por subtareas?",
-      "¿Quieres saber las dependencias de esta tarea?"
-    ]
-  };
-
-  let sugerencias = sugerenciasBase[estado] || ["¿En qué más puedo ayudarte?"];
-
-  // ✅ MEJORADO: Personalizar sugerencias según datos disponibles
-  if (contexto && contexto.datosActividades && contexto.datosActividades.actividades) {
-    const actividades = contexto.datosActividades.actividades;
-
-    // Si hay muchas tareas sin tiempo, sugerir estimarlas
-    const tieneTareasSinTiempo = contexto.datosActividades.metrics &&
-      contexto.datosActividades.metrics.tareasSinTiempo > 0;
-
-    if (tieneTareasSinTiempo) {
-      sugerencias.push(`¿Quieres estimar tiempo para las ${contexto.datosActividades.metrics.tareasSinTiempo} tareas sin tiempo?`);
-    }
-
-    // Si hay tareas de alta prioridad
-    const tieneAltaPrioridad = contexto.datosActividades.metrics &&
-      contexto.datosActividades.metrics.tareasAltaPrioridad > 0;
-
-    if (tieneAltaPrioridad) {
-      sugerencias.push(`¿Necesitas ayuda con las ${contexto.datosActividades.metrics.tareasAltaPrioridad} tareas de alta prioridad?`);
-    }
-
-    // Si hay proyecto principal específico
-    if (contexto.datosActividades.proyectoPrincipal) {
-      const proyecto = contexto.datosActividades.proyectoPrincipal;
-      if (proyecto.length > 50) {
-        sugerencias.push(`¿Quieres enfocarte solo en el proyecto principal?`);
-      } else {
-        sugerencias.push(`¿Quieres enfocarte solo en '${proyecto.substring(0, 40)}...'?`);
-      }
-    }
-  }
-
-  // Limitar a máximo 5 sugerencias
-  return sugerencias.slice(0, 5);
-}
-function determinarNuevoEstado(respuestaIA, contexto) {
-  const respuestaLower = respuestaIA.toLowerCase();
-
-  if (respuestaLower.includes('?') || respuestaLower.includes('¿')) {
-    return 'esperando_respuesta';
-  }
-
-  if (respuestaLower.includes('recomiendo') || respuestaLower.includes('sugiero') ||
-    respuestaLower.includes('te aconsejo') || respuestaLower.includes('prioriza')) {
-    return 'dando_recomendaciones';
-  }
-
-  if (respuestaLower.includes('explic') || respuestaLower.includes('detall') ||
-    respuestaLower.includes('información')) {
-    return 'explicando_detalles';
-  }
-
-  if (contexto.datosActividades && contexto.datosActividades.actividades.length > 0) {
-    return 'revisando_actividades';
-  }
-
-  return 'conversando';
-}
-function construirPromptContexto(contexto, mensajeActual) {
-  // Mantener solo las últimas 6 interacciones para no saturar el prompt
-  const historialRelevante = contexto.historial.slice(-6);
-
-  let prompt = "Eres un asistente especializado en gestión de proyectos y productividad.\n\n";
-
-  prompt += "CONTEXTO DE LA CONVERSACIÓN:\n";
-
-  // Incluir información de actividades si está disponible
-  if (contexto.datosActividades) {
-    prompt += `- Proyecto principal: ${contexto.datosActividades.proyectoPrincipal}\n`;
-    prompt += `- Total tareas: ${contexto.datosActividades.metrics.tareasConTiempo + contexto.datosActividades.metrics.tareasSinTiempo}\n`;
-    prompt += `- Tiempo estimado: ${contexto.datosActividades.metrics.tiempoEstimadoTotal}\n`;
-  }
-
-  prompt += `- Estado actual: ${contexto.estado}\n\n`;
-
-  prompt += "HISTORIAL RECIENTE:\n";
-  historialRelevante.forEach((msg, index) => {
-    const rol = msg.role === 'user' ? 'Usuario' : 'Asistente';
-    const tipo = msg.tipo ? ` [${msg.tipo}]` : '';
-    prompt += `${rol}${tipo}: ${msg.content}\n`;
-  });
-
-  prompt += `\nNUEVO MENSAJE DEL USUARIO: "${mensajeActual}"\n\n`;
-
-  prompt += "INSTRUCCIONES PARA TU RESPUESTA:\n";
-  prompt += "1. Mantén el contexto de la conversación anterior\n";
-  prompt += "2. Sé útil, conciso y profesional\n";
-  prompt += "3. Si es relevante, menciona el proyecto principal o las tareas\n";
-  prompt += "4. Haz preguntas de seguimiento cuando sea apropiado\n";
-  prompt += "5. NO uses emojis ni formato especial\n";
-  prompt += "6. Mantén un tono amigable pero profesional\n";
-
-  return prompt;
-}
-function limpiarConversacionesAntiguas() {
-  const ahora = Date.now();
-  const UNA_HORA = 60 * 60 * 1000;
-
-  for (const [sessionId, contexto] of conversaciones.entries()) {
-    if (ahora - contexto.timestamp > UNA_HORA) {
-      conversaciones.delete(sessionId);
-    }
-  }
-}
-async function necesitaActualizarDatos(contexto, mensaje) {
-  const palabrasActualizar = ['actualizar', 'nuevo', 'ahora', 'hoy', 'revisar', 'consultar'];
-  const tienePalabraActualizar = palabrasActualizar.some(palabra =>
-    mensaje.toLowerCase().includes(palabra)
-  );
-
-  if (!contexto.datosActividades || tienePalabraActualizar) {
-    return true;
-  }
-
-  if (contexto.ultimaConsulta) {
-    const ultima = new Date(contexto.ultimaConsulta);
-    const ahora = new Date();
-    const minutosDif = (ahora - ultima) / (1000 * 60);
-    return minutosDif > 5;
-  }
-
-  return false;
-}
 // Funciones originales (mantener compatibilidad)
 export async function devuelveActividades(req, res) {
   try {
     const { email } = sanitizeObject(req.body);
 
+
     // Obtener el ID del usuario desde el token (viene del middleware de auth)
-    const { sessionUserId } = req.cookies;
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const sessionUserId = decoded.id;
 
-    const usersData = await getAllUsers();
-    const user = usersData.items.find(
-      (u) => u.email.toLowerCase() === email.toLowerCase()
-    );
+    const sessionId = generarSessionIdDiario(sessionUserId);
 
-    if (!user) {
-      return res.status(404).json({ error: 'Usuario no encontrado' });
-    }
-
-    // Generar sessionId para esta consulta
-    const sessionId = `act_${sessionUserId}_${Date.now()}`.replace(/[^a-zA-Z0-9_]/g, '_');
-
-    // ✅ Guardar consulta del usuario en historial
-    await guardarMensajeHistorial(
-      sessionUserId,
-      sessionId,
-      "usuario",
-      `Consulta de actividades del día para ${email}`
-    );
-
+ 
     const response = await axios.get(
       `${urlApi}/actividades/assignee/${email}/del-dia`
     );
@@ -2985,13 +498,7 @@ export async function devuelveActividades(req, res) {
     const actividadesRaw = response.data.data;
 
     if (!Array.isArray(actividadesRaw)) {
-      // ✅ Guardar respuesta del bot en historial
-      await guardarMensajeHistorial(
-        sessionUserId,
-        sessionId,
-        "bot",
-        "No se encontraron actividades (respuesta inválida)"
-      );
+     
       return res.json([]);
     }
 
@@ -3005,13 +512,8 @@ export async function devuelveActividades(req, res) {
 
     // 2. Si no hay actividad en ese horario, retornar array vacío
     if (!actividadSeleccionada) {
-      // ✅ Guardar respuesta del bot en historial
-      await guardarMensajeHistorial(
-        sessionUserId,
-        sessionId,
-        "bot",
-        "No hay actividades en horario 09:30-16:30"
-      );
+      
+      // );
       return res.json([]);
     }
 
@@ -3033,14 +535,6 @@ export async function devuelveActividades(req, res) {
       ? [resultado]
       : [];
 
-    // ✅ Guardar respuesta del bot en historial
-    await guardarMensajeHistorial(
-      sessionUserId,
-      sessionId,
-      "bot",
-      `Actividad encontrada: "${resultado.t}" con ${resultado.p} pendientes`
-    );
-
     return res.json(actividadesFiltradas);
 
   } catch (error) {
@@ -3051,6 +545,7 @@ export async function devuelveActividades(req, res) {
     });
   }
 }
+
 export async function devuelveActReviciones(req, res) {
   try {
     const { email, idsAct, sessionId: reqSessionId } = sanitizeObject(req.body);
@@ -3062,23 +557,12 @@ export async function devuelveActReviciones(req, res) {
       });
     }
 
-    // Obtener usuario para historial
-    const usersData = await getAllUsers();
-    const user = usersData.items.find(
-      (u) => u.email.toLowerCase() === email.toLowerCase()
-    );
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const odooUserId = decoded.id.toString();
 
-    const { sessionUserId } = req.cookies;
-    const odooUserId = sessionUserId
-    const sessionId = reqSessionId || `rev_${email}_${Date.now()}`.replace(/[^a-zA-Z0-9_]/g, '_');
 
-    // ✅ Guardar consulta del usuario en historial
-    await guardarMensajeHistorial(
-      odooUserId,
-      sessionId,
-      "usuario",
-      `Consulta de revisiones para ${idsAct.length} actividades`
-    );
+    const sessionId = generarSessionIdDiario(odooUserId);;
 
     const today = new Date();
     const formattedToday = today.toISOString().split('T')[0];
@@ -3136,14 +620,6 @@ export async function devuelveActReviciones(req, res) {
     const resultado = Array.from(actividadesRevi.values());
     const totalPendientes = resultado.reduce((sum, act) => sum + act.pendientes.length, 0);
 
-    // ✅ Guardar respuesta del bot en historial
-    await guardarMensajeHistorial(
-      odooUserId,
-      sessionId,
-      "bot",
-      `Se encontraron ${resultado.length} actividades con ${totalPendientes} pendientes totales.`
-    );
-
     return res.status(200).json({
       success: true,
       sessionId: sessionId,
@@ -3168,92 +644,222 @@ export async function devuelveActReviciones(req, res) {
 
 export async function guardarPendientes(req, res) {
   try {
-    // Acepta tanto userId como odooUserId para compatibilidad
-    const { userId, activityId, pendientes, sessionId: reqSessionId } = req.body;
 
-    const { sessionUserId } = req.cookies;
-    const odooUserId = sessionUserId
+    const { answer, data } = sanitizeObject(req.body);
 
-    // Usar odooUserId si existe, sino usar userId
-    const finalUserId = odooUserId || userId;
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const userId = decoded.id.toString();
 
-    if (!finalUserId || !activityId || !Array.isArray(pendientes)) {
-      console.log("error datos faltentes o los pendientes no son un array")
+    if (
+      !userId ||
+      !data?.actividades?.length ||
+      !data?.revisionesPorActividad?.length
+    ) {
       return res.status(400).json({
-        error: "Faltan datos requeridos"
+        error: "JSON incompleto para guardar pendientes"
       });
     }
 
-    const sessionId = reqSessionId || `pend_${finalUserId}_${Date.now()}`.replace(/[^a-zA-Z0-9_]/g, '_');
-
-    // ✅ Guardar acción del usuario en historial
-    await guardarMensajeHistorial(
-      finalUserId,
-      sessionId,
-      "usuario",
-      `Guardando ${pendientes.length} pendientes para la actividad ${activityId}`
+    const actividad = data.actividades[0];
+    const revision = data.revisionesPorActividad.find(
+      r => r.actividadId === actividad.id
     );
 
-    const registro = await ActividadPendientes.create({
-      userId: finalUserId,  // Guardar con el campo original del modelo
-      activityId,
-      pendientes
-    });
+    if (!revision) {
+      return res.status(400).json({
+        error: "No hay revisión para la actividad"
+      });
+    }
 
-    // ✅ Guardar confirmación del bot en historial
-    await guardarMensajeHistorial(
-      finalUserId,
-      sessionId,
-      "bot",
-      `Se guardaron exitosamente ${pendientes.length} pendientes. ID: ${registro._id}`
+    // 🔁 Mapear pendientes al schema real
+    const pendientesMapeados = revision.pendientes.map(p => ({
+      pendienteId: p.id,
+      nombre: p.nombre,
+      descripcion: "",
+      estado: p.terminada ? "completado" : "pendiente"
+    }));
+
+    const sessionId = generarSessionIdDiario(userId);
+
+    // 🔍 Buscar o crear actividad
+    const actividadDB = await ActividadesSchema.findOneAndUpdate(
+      {
+        userId,
+        nombre: actividad.titulo
+      },
+      {
+        $setOnInsert: {
+          userId,
+          nombre: actividad.titulo
+        },
+        $push: {
+          pendientes: { $each: pendientesMapeados }
+        }
+      },
+      {
+        new: true,
+        upsert: true
+      }
     );
+
+ 
 
     res.status(201).json({
-      ...registro.toObject(),
-      sessionId: sessionId
+      success: true,
+      actividad: actividadDB.nombre,
+      pendientesGuardados: pendientesMapeados.length,
+      sessionId
     });
+
   } catch (error) {
     console.error("Error en guardarPendientes:", error);
     res.status(500).json({ error: error.message });
   }
 }
 
-// ✅ NUEVAS FUNCIONES: Obtener historial desde MongoDB
 
 /**
  * Obtiene el historial de una sesión específica
  */
+
 export async function obtenerHistorialSesion(req, res) {
   try {
-    const { sessionId } = sanitizeObject(req.query);
+    const { token } = req.cookies;
 
-    const { sessionUserId } = req.cookies;
-    const odooUserId = sessionUserId
-
-
-    if (!odooUserId || !sessionId) {
-      return res.status(400).json({
+    if (!token) {
+      return res.status(401).json({
         success: false,
-        message: "odooUserId y sessionId son requeridos"
+        message: "No autenticado"
       });
     }
 
-    const historial = await HistorialBot.findOne({ odooUserId, sessionId });
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const userId = decoded.id.toString();
+    const sessionId = generarSessionIdDiario(userId);
+
+    // Buscar historial y actividades en paralelo
+    const [historial, actividades] = await Promise.all([
+      HistorialBot.findOne({ userId, sessionId }).lean(),
+      ActividadesSchema.findOne({ userId }).lean()
+    ]);
 
     if (!historial) {
-      return res.status(404).json({
-        success: false,
-        message: "No se encontró historial para esta sesión"
+      return res.json({
+        success: true,
+        data: null,
+        actividades: actividades || null
+      });
+    }
+
+    /* --------------------------------------------------
+       FILTRAR ACTIVIDADES SOLO CON REVISIONES
+    -------------------------------------------------- */
+    if (
+      historial?.ultimoAnalisis?.data?.revisionesPorActividad &&
+      historial?.ultimoAnalisis?.data?.actividades
+    ) {
+      const idsConRevision = new Set(
+        historial.ultimoAnalisis.data.revisionesPorActividad.map(
+          r => r.actividadId
+        )
+      );
+
+      historial.ultimoAnalisis.data.actividades =
+        historial.ultimoAnalisis.data.actividades.filter(a =>
+          idsConRevision.has(a.id)
+        );
+    }
+
+    /* --------------------------------------------------
+       CRUZAR ESTADO DE TAREAS CON PENDIENTES
+    -------------------------------------------------- */
+    if (
+      historial?.tareasEstado?.length &&
+      historial?.ultimoAnalisis?.data?.revisionesPorActividad
+    ) {
+      const estadoPorTarea = new Map(
+        historial.tareasEstado.map(t => [t.taskId, t])
+      );
+
+      historial.ultimoAnalisis.data.revisionesPorActividad.forEach(revision => {
+        revision.pendientes.forEach(pendiente => {
+          const estado = estadoPorTarea.get(pendiente.id);
+
+          if (estado) {
+            // Restauramos el estado de validación previo
+            tarea.confirmada = estado.validada;
+            tarea.explicacion = estado.explicacion;
+            tarea.explicada = true; // Flag para que el frontend sepa que ya no debe pedirla
+          } else {
+            tarea.confirmada = false;
+            tarea.explicada = false;
+          }
+        });
       });
     }
 
     return res.json({
       success: true,
-      data: historial
+      data: historial,
+      actividades: actividades || null
     });
 
   } catch (error) {
-    console.error("Error obteniendo historial:", error);
+    console.error("Error en validarExplicacion:", error);
+    return res.status(500).json({
+      valida: false,
+      razon: "Error interno al procesar la validación."
+    });
+  }
+}
+
+
+
+
+export async function confirmarEstadoPendientes(req, res) {
+  try {
+    const { actividadesId, IdPendientes, estado, motivoNoCompletado } = sanitizeObject(req.body);
+
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const userId = decoded.id.toString();
+
+    if (!actividadesId || !IdPendientes || !estado) {
+      return res.status(400).json({
+        success: false,
+        message: "actividadesId, IdPendientes y estado son requeridos"
+      });
+    }
+
+    // Actualizamos el estado del pendiente dentro de la actividad del proyecto
+    const resultado = await ProyectosSchema.updateOne(
+      {
+        userId,
+        'actividades.ActividadId': actividadesId,
+        'actividades.pendientes.pendienteId': IdPendientes
+      },
+      {
+        $set: {
+          'actividades.$[act].pendientes.$[pen].estado': estado,
+          'actividades.$[act].pendientes.$[pen].motivoNoCompletado': motivoNoCompletado
+        }
+      },
+      {
+        arrayFilters: [
+          { 'act.ActividadId': actividadesId },
+          { 'pen.pendienteId': IdPendientes }
+        ]
+      }
+    );
+
+    return res.json({
+      success: true,
+      message: "Estado actualizado correctamente",
+      data: resultado
+    });
+  } catch (error) {
+    console.error("Error actualizando estado:", error);
     return res.status(500).json({
       success: false,
       message: "Error interno"
@@ -3261,626 +867,297 @@ export async function obtenerHistorialSesion(req, res) {
   }
 }
 
-/**
- * Obtiene todos los historiales de un usuario con paginación
- */
-export async function obtenerHistorialesUsuario(req, res) {
+export async function validarExplicacion(req, res) {
   try {
-    const { limit = 10, skip = 0 } = sanitizeObject(req.query);
+    const { taskName, explanation, activityTitle } = sanitizeObject(req.body);
+    const cleanTitle = activityTitle.replace(/,/g, ' ');
 
-    const { sessionUserId } = req.cookies;
-    const odooUserId = sessionUserId
+    const { token } = req.cookies;
+    if (!token) {
+      return res.status(401).json({ valida: false, razon: "No autenticado" });
+    }
 
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const userId = decoded.id.toString();
+    const sessionId = generarSessionIdDiario(userId);
 
-    if (!odooUserId) {
-      return res.status(400).json({
+    console.log(explanation);
+
+    const prompt = `
+Eres un asistente que verifica si un comentario está relacionado
+con una tarea específica o con algo necesario para poder trabajar en ella hoy.
+
+CONTEXTO:
+- Actividad: "${cleanTitle}"
+- Tarea: "${taskName}"
+- Comentario del usuario: "${explanation}"
+
+INSTRUCCIONES:
+- Considera relacionado si el comentario:
+  - Describe acciones sobre la tarea, o
+  - Menciona algo necesario para poder avanzar en ella hoy
+    (por ejemplo: herramientas, equipo, bloqueos prácticos).
+- No evalúes calidad, detalle ni redacción.
+- Comentarios breves o informales son aceptables.
+- Solo marca como no relacionado si habla de un tema totalmente distinto
+  o no se entiende ninguna intención.
+
+RESPONDE ÚNICAMENTE EN JSON:
+{
+  "esDelTema": true o false,
+  "razon": "Frase corta (máx 10 palabras)",
+  "sugerencia": "Pregunta corta para orientar al usuario (vacía si esDelTema es true)"
+}
+`;
+
+    const aiResult = await smartAICall(prompt);
+    const text = aiResult?.text;
+
+    if (!text) {
+      return res.status(500).json({ valida: false, razon: "La IA no respondió." });
+    }
+
+    // Extracción robusta del JSON
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      return res.status(500).json({ valida: false, razon: "Formato de IA inválido." });
+    }
+
+    const resultadoIA = JSON.parse(jsonMatch[0]);
+    console.log(resultadoIA);
+
+    // 1️⃣ PRIMERO: Crear la respuesta
+    const respuesta = {
+      valida: resultadoIA.esDelTema === true,
+      categoriaMotivo: resultadoIA.categoriaMotivo || "INSUFICIENTE",
+      razon: resultadoIA.razon || "Revisión técnica necesaria.",
+      sugerencia: resultadoIA.sugerencia || "",
+    };
+
+    // 2️⃣ DESPUÉS: Actualizar historial según el resultado
+    if (respuesta.valida) {
+      // Explicación válida - marcar tarea como explicada
+      await HistorialBot.updateOne(
+        {
+          userId,
+          sessionId,
+          "tareasEstado.taskName": taskName
+        },
+        {
+          $set: {
+            "tareasEstado.$.validada": true,
+            "tareasEstado.$.explicada": true,
+            "tareasEstado.$.explicacion": explanation,
+            "tareasEstado.$.ultimoIntento": new Date()
+          }
+        }
+      );
+    } else {
+      // Explicación inválida - solo registrar intento
+      await HistorialBot.updateOne(
+        {
+          userId,
+          sessionId,
+          "tareasEstado.taskName": taskName
+        },
+        {
+          $set: {
+            "tareasEstado.$.ultimoIntento": new Date()
+          }
+        }
+      );
+    }
+
+    // 3️⃣ Guardar mensajes en historial
+    await HistorialBot.updateOne(
+      { userId, sessionId },
+      {
+        $push: {
+          mensajes: {
+            $each: [
+              {
+                role: "usuario",
+                contenido: `[Explicación para "${taskName}"]: ${explanation}`,
+                timestamp: new Date(),
+                tipoMensaje: "texto"
+              },
+              {
+                role: "bot",
+                contenido: respuesta.valida
+                  ? `Explicación válida: ${respuesta.razon}`
+                  : `${respuesta.razon}. ${respuesta.sugerencia || ''}`,
+                timestamp: new Date(),
+                tipoMensaje: "respuesta_ia"
+              }
+            ]
+          }
+        }
+      }
+    );
+
+    // Log para monitoreo
+    if (!respuesta.valida) {
+      console.log(`[Validación Fallida] Tarea: ${taskName} | Motivo: ${respuesta.categoriaMotivo}`);
+    }
+
+    return res.json(respuesta);
+
+  } catch (error) {
+    console.error("Error en validarExplicacion:", error);
+    return res.status(500).json({
+      valida: false,
+      razon: "Error interno al procesar la validación."
+    });
+  }
+}
+
+export async function guardarExplicaciones(req, res) {
+  try {
+    const { explanations } = sanitizeObject(req.body);
+
+    console.log(explanations);
+
+    const { token } = req.cookies;
+    if (!token) {
+      return res.status(401).json({
         success: false,
-        message: "odooUserId es requerido"
+        message: "Token requerido"
       });
     }
 
-    const historiales = await HistorialBot.find({ odooUserId })
-      .sort({ updatedAt: -1 })
-      .limit(parseInt(limit))
-      .skip(parseInt(skip));
+    const { id: userId } = jwt.verify(token, TOKEN_SECRET);
 
-    const total = await HistorialBot.countDocuments({ odooUserId });
+    if (!Array.isArray(explanations) || explanations.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "No hay explicaciones para guardar"
+      });
+    }
+
+    let totalGuardadas = 0;
+
+    for (const exp of explanations) {
+      const {
+        taskId,
+        taskName,
+        explanation,
+        confirmed,
+        activityTitle,
+        duration,
+        priority
+      } = exp;
+
+      if (!taskId || !taskName || !explanation || !activityTitle) continue;
+
+      // Busca la actividad
+      let actividad = await ActividadesSchema.findOne({
+        userId,
+        nombre: activityTitle
+      });
+
+      if (!actividad) {
+        actividad = await ActividadesSchema.create({
+          userId,
+          nombre: activityTitle,
+          pendientes: []
+        });
+      }
+
+      // Verifica si ya existe el pendiente
+      const pendienteExistente = actividad.pendientes.find(
+        p => p.pendienteId === taskId
+      );
+
+      if (pendienteExistente) {
+        // Actualiza si ya existe
+        pendienteExistente.descripcion = explanation;
+        pendienteExistente.estado = confirmed ? "completado" : "pendiente";
+        pendienteExistente.duracionMin = duration ?? pendienteExistente.duracionMin;
+        pendienteExistente.prioridad = priority ?? pendienteExistente.prioridad;
+      } else {
+        // Crea un nuevo pendiente
+        actividad.pendientes.push({
+          pendienteId: taskId,
+          nombre: taskName,
+          descripcion: explanation,
+          estado: confirmed ? "completado" : "pendiente",
+          duracionMin: duration ?? 0,
+          prioridad: priority ?? "BAJA"
+        });
+      }
+
+      await actividad.save();
+      totalGuardadas++;
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Pendientes guardados correctamente",
+      totalGuardadas
+    });
+
+  } catch (error) {
+    console.error("Error en guardarExplicaciones:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error interno al guardar explicaciones",
+      error: error.message
+    });
+  }
+}
+
+export async function obtenerSiguienteTarea(req, res) {
+  try {
+    const { token } = req.cookies;
+    if (!token) {
+      return res.status(401).json({ success: false, message: "No autenticado" });
+    }
+
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const userId = decoded.id.toString();
+    const sessionId = generarSessionIdDiario(userId);
+
+    const historial = await HistorialBot.findOne({ userId, sessionId });
+
+    if (!historial || !historial.tareasEstado?.length) {
+      return res.json({
+        success: true,
+        hayPendientes: false,
+        mensaje: "No hay tareas registradas para hoy"
+      });
+    }
+
+    const siguienteTarea = historial.tareasEstado.find(t => !t.validada);
+
+    if (!siguienteTarea) {
+      return res.json({
+        success: true,
+        hayPendientes: false,
+        todasCompletadas: true,
+        mensaje: "¡Todas las tareas han sido explicadas!"
+      });
+    }
+
+    const totalTareas = historial.tareasEstado.length;
+    const tareasCompletadas = historial.tareasEstado.filter(t => t.validada).length;
 
     return res.json({
       success: true,
-      data: historiales,
-      pagination: {
-        total,
-        limit: parseInt(limit),
-        skip: parseInt(skip),
-        hasMore: (parseInt(skip) + historiales.length) < total
+      hayPendientes: true,
+      siguienteTarea: {
+        taskId: siguienteTarea.taskId,
+        taskName: siguienteTarea.taskName,
+        actividadTitulo: siguienteTarea.actividadTitulo
+      },
+      progreso: {
+        completadas: tareasCompletadas,
+        total: totalTareas,
+        porcentaje: Math.round((tareasCompletadas / totalTareas) * 100)
       }
     });
 
   } catch (error) {
-    console.error("Error obteniendo historiales:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Error interno"
-    });
+    console.error("Error en obtenerSiguienteTarea:", error);
+    return res.status(500).json({ success: false, message: "Error interno" });
   }
 }
-
-/**
- * Elimina el historial de una sesión específica
- */
-export async function eliminarHistorialSesion(req, res) {
-  try {
-    const { sessionId } = sanitizeObject(req.body);
-
-    const { sessionUserId } = req.cookies;
-    const odooUserId = sessionUserId
-
-
-    if (!odooUserId || !sessionId) {
-      return res.status(400).json({
-        success: false,
-        message: "odooUserId y sessionId son requeridos"
-      });
-    }
-
-    const resultado = await HistorialBot.deleteOne({ odooUserId, sessionId });
-
-    if (resultado.deletedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "No se encontró historial para eliminar"
-      });
-    }
-
-    return res.json({
-      success: true,
-      message: "Historial eliminado correctamente"
-    });
-
-  } catch (error) {
-    console.error("Error eliminando historial:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Error interno"
-    });
-  }
-}
-
-// export async function getActividadesConRevisiones(req, res) {
-//   try {
-//     const { email, question = "¿Qué actividades y revisiones tengo hoy? ¿Qué me recomiendas priorizar?", showAll = false } = sanitizeObject(req.body);
-
-//     const { token } = req.cookies;
-
-//     if (!token) {
-//       return res.status(401).json({
-//         success: false,
-//         message: "No autenticado"
-//       });
-//     }
-
-//     let decoded;
-
-//     try {
-//       decoded = jwt.verify(token, TOKEN_SECRET);
-//     } catch (err) {
-//       console.log(err)
-//       return res.status(401).json({ message: "Token inválido" });
-//     }
-
-//     const odooUserId = decoded.id;
-
-//     const sessionId = generarSessionIdDiario(odooUserId)
-
-//     const usersData = await getAllUsers();
-//     const user = usersData.items.find(
-//       (u) => u.email.toLowerCase() === email.toLowerCase()
-//     );
-
-//     if (!user) {
-//       return res.status(404).json({ error: 'Usuario no encontrado' });
-//     }
-
-//     // Obtener actividades del día para el usuario
-//     const actividadesResponse = await axios.get(
-//       `${urlApi}/actividades/assignee/${email}/del-dia`
-//     );
-
-//     const actividadesRaw = actividadesResponse.data.data;
-
-//     if (!Array.isArray(actividadesRaw) || actividadesRaw.length === 0) {
-//       const respuestaSinActividades = "No tienes actividades registradas para hoy";
-
-//       // ✅ Guardar respuesta del bot en historial
-//       await guardarMensajeHistorial(odooUserId, sessionId, "bot", respuestaSinActividades);
-
-//       return res.json({
-//         success: true,
-//         answer: respuestaSinActividades,
-//         sessionId: sessionId,
-//         actividades: [],
-//         revisionesPorActividad: {}
-//       });
-//     }
-
-//     // OBTENER PROYECTO PRINCIPAL (actividad 09:30-16:30) - DINÁMICO
-//     // const actividadPrincipal = actividadesRaw.find(a =>
-//     //   a.horaInicio === '09:30' && a.horaFin === '16:30'
-//     // );
-//     const actividadPrincipal = null;
-
-//     // Extraer el nombre del proyecto principal DINÁMICAMENTE
-//     let proyectoPrincipal = "Sin proyecto específico";
-//     if (actividadPrincipal) {
-//       if (actividadPrincipal.tituloProyecto && actividadPrincipal.tituloProyecto !== "Sin proyecto") {
-//         proyectoPrincipal = actividadPrincipal.tituloProyecto;
-//       } else if (actividadPrincipal.titulo) {
-//         // Intentar extraer del título
-//         const tituloLimpio = actividadPrincipal.titulo
-//           .replace('analizador de pendientes 00act', '')
-//           .replace('anfeta', '')
-//           .trim();
-//         proyectoPrincipal = tituloLimpio || actividadPrincipal.titulo.substring(0, 50) + "...";
-//       }
-//     }
-
-//     // FILTRAR según el parámetro showAll
-//     let actividadesFiltradas = [];
-//     let mensajeHorario = "";
-//     let mostrarSoloConTiempo = true;
-
-//     if (question.includes("otros horarios") || showAll) {
-//       actividadesFiltradas = actividadesRaw;
-//       mensajeHorario = "Mostrando todas las actividades del día";
-//       mostrarSoloConTiempo = false;
-//     } else {
-//       actividadesFiltradas = actividadesRaw.filter((a) => {
-//         return a.horaInicio === '09:30' && a.horaFin === '16:30';
-//       });
-//       mensajeHorario = "Actividades en horario 09:30-16:30";
-//       if (actividadesFiltradas.length === 0) {
-//         const respuestaSinHorario = "No tienes actividades programadas en el horario de 09:30 a 16:30";
-
-//         // Guardar respuesta del bot en historial
-//         await guardarMensajeHistorial(odooUserId, sessionId, "bot", respuestaSinHorario);
-
-//         return res.json({
-//           success: true,
-//           answer: respuestaSinHorario,
-//           sessionId: sessionId,
-//           actividades: actividadesRaw.map(a => ({
-//             id: a.id,
-//             titulo: a.titulo,
-//             horario: `${a.horaInicio} - ${a.horaFin}`,
-//             status: a.status,
-//             proyecto: a.tituloProyecto || "Sin proyecto"
-//           })),
-//           revisionesPorActividad: {},
-//           proyectoPrincipal: proyectoPrincipal,
-//           sugerencias: [
-//             "¿Quieres ver todas tus actividades del día?",
-//             "¿Necesitas ayuda con actividades en otros horarios?",
-//             "¿Quieres que te ayude a planificar estas actividades?"
-//           ]
-//         });
-//       }
-//     }
-//     const actividadesMap = new Map();
-//     actividadesFiltradas.forEach(a => {
-//       if (!actividadesMap.has(a.id)) {
-//         actividadesMap.set(a.id, a);
-//       }
-//     });
-//     actividadesFiltradas = Array.from(actividadesMap.values());
-
-//     // 2️⃣ Extraer IDs de todas las actividades filtradas
-//     const actividadIds = actividadesFiltradas.map(a => a.id);
-
-//     // 3️⃣ Obtener fecha actual para las revisiones
-//     const today = new Date();
-//     const formattedToday = today.toISOString().split('T')[0];
-
-//     // 4️⃣ Obtener TODAS las revisiones del día
-//     let todasRevisiones = { colaboradores: [] };
-//     try {
-//       const revisionesResponse = await axios.get(
-//         `${urlApi}/reportes/revisiones-por-fecha`,
-//         {
-//           params: {
-//             date: formattedToday,
-//             colaborador: email
-//           }
-//         }
-//       );
-
-//       if (revisionesResponse.data?.success) {
-//         todasRevisiones = revisionesResponse.data.data || { colaboradores: [] };
-//       }
-//     } catch (error) {
-//       console.warn("Error obteniendo revisiones:", error.message);
-//     }
-
-//     // 5️⃣ Filtrar y organizar revisiones por actividad
-//     const revisionesPorActividad = {};
-//     const tareasConTiempo = {};
-//     const tareasSinTiempo = {};
-
-//     actividadesFiltradas.forEach(actividad => {
-//       revisionesPorActividad[actividad.id] = {
-//         actividad: {
-//           id: actividad.id,
-//           titulo: actividad.titulo,
-//           horaInicio: actividad.horaInicio,
-//           horaFin: actividad.horaFin,
-//           status: actividad.status,
-//           proyecto: actividad.tituloProyecto
-//         },
-//         pendientesConTiempo: [],
-//         pendientesSinTiempo: []
-//       };
-
-//       tareasConTiempo[actividad.id] = [];
-//       tareasSinTiempo[actividad.id] = [];
-//     });
-
-
-//     // Procesar revisiones - SEPARAR por tiempo
-//     if (todasRevisiones.colaboradores && Array.isArray(todasRevisiones.colaboradores)) {
-//       todasRevisiones.colaboradores.forEach(colaborador => {
-//         (colaborador.items?.actividades ?? []).forEach(actividad => {
-//           if (actividadIds.includes(actividad.id) && actividad.pendientes) {
-//             (actividad.pendientes ?? []).forEach(p => {
-//               const estaAsignado = p.assignees?.some(a => a.name === email);
-//               if (!estaAsignado) return;
-
-//               // ✅ VERIFICAR SI YA EXISTE ANTES DE AGREGAR
-//               const yaExisteConTiempo = revisionesPorActividad[actividad.id].pendientesConTiempo.some(
-//                 existente => existente.id === p.id
-//               );
-//               const yaExisteSinTiempo = revisionesPorActividad[actividad.id].pendientesSinTiempo.some(
-//                 existente => existente.id === p.id
-//               );
-
-//               if (yaExisteConTiempo || yaExisteSinTiempo) return; // ✅ SALTAR SI YA EXISTE
-
-//               const pendienteInfo = {
-//                 id: p.id,
-//                 nombre: p.nombre,
-//                 terminada: p.terminada,
-//                 confirmada: p.confirmada,
-//                 duracionMin: p.duracionMin || 0,
-//                 fechaCreacion: p.fechaCreacion,
-//                 fechaFinTerminada: p.fechaFinTerminada,
-//                 diasPendiente: p.fechaCreacion ?
-//                   Math.floor((new Date() - new Date(p.fechaCreacion)) / (1000 * 60 * 60 * 24)) : 0
-//               };
-
-//               // SEPARAR por tiempo
-//               if (p.duracionMin && p.duracionMin > 0) {
-//                 pendienteInfo.prioridad = p.duracionMin > 60 ? "ALTA" :
-//                   p.duracionMin > 30 ? "MEDIA" : "BAJA";
-//                 tareasConTiempo[actividad.id].push(pendienteInfo);
-//                 revisionesPorActividad[actividad.id].pendientesConTiempo.push(pendienteInfo);
-//               } else {
-//                 pendienteInfo.prioridad = "SIN TIEMPO";
-//                 tareasSinTiempo[actividad.id].push(pendienteInfo);
-//                 revisionesPorActividad[actividad.id].pendientesSinTiempo.push(pendienteInfo);
-//               }
-//             });
-//           }
-//         });
-//       });
-//     }
-
-//     // 6️⃣ Calcular métricas
-//     let totalTareasConTiempo = 0;
-//     let totalTareasSinTiempo = 0;
-//     let tareasAltaPrioridad = 0;
-//     let tiempoTotalEstimado = 0;
-
-//     Object.keys(revisionesPorActividad).forEach(actividadId => {
-//       const actividad = revisionesPorActividad[actividadId];
-//       totalTareasConTiempo += actividad.pendientesConTiempo.length;
-//       totalTareasSinTiempo += actividad.pendientesSinTiempo.length;
-//       tareasAltaPrioridad += actividad.pendientesConTiempo.filter(t => t.prioridad === "ALTA").length;
-//       tiempoTotalEstimado += actividad.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0);
-//     });
-
-//     const horasTotales = Math.floor(tiempoTotalEstimado / 60);
-//     const minutosTotales = tiempoTotalEstimado % 60;
-//     const totalTareas = totalTareasConTiempo + totalTareasSinTiempo;
-
-//     // Guardar el proyecto
-//     try {
-//       await ProyectosSchema.findOneAndUpdate(
-//         {
-//           userId: odooUserId,
-//           nombre: proyectoPrincipal
-//         },
-//         {
-//           $setOnInsert: {
-//             userId: odooUserId,
-//             actividades: [],
-//             nombre: proyectoPrincipal
-//           }
-//         },
-//         { upsert: true }
-//       );
-//     } catch (error) {
-//       if (error.code === 11000) {
-//         return res.status(400).json({
-//           status: "error",
-//           message: "El nombre del proyecto ya existe en la base de datos."
-//         });
-//       }
-//       // Manejar otros errores
-//       next(error);
-//     }
-
-//     // Guardar actividades (SOLO UN FOR)
-//     for (const actividadId of Object.keys(revisionesPorActividad)) {
-//       const actividad = revisionesPorActividad[actividadId];
-
-//       // Deduplicar con Map
-//       const pendientesMap = new Map();
-//       actividad.pendientesConTiempo.forEach(p => {
-//         if (!pendientesMap.has(p.id)) {
-//           pendientesMap.set(p.id, {
-//             pendienteId: p.id,
-//             nombre: p.nombre || "",
-//             descripcion: "",
-//             estado: p.terminada ? "completado" : "pendiente",
-//             duracionMin: p.duracionMin || 0,
-//             prioridad: p.prioridad || "BAJA",
-//             fechaCreacion: p.fechaCreacion ? new Date(p.fechaCreacion) : new Date()
-//           });
-//         }
-//       });
-//       const pendientesUnicos = Array.from(pendientesMap.values());
-
-//       // Actualizar actividades por dia
-//       try {
-//         const resultado = await ProyectosSchema.updateOne(
-//           {
-//             userId: odooUserId,
-//             "actividades.ActividadId": actividadId
-//           },
-//           {
-//             $set: {
-//               "actividades.$.pendientes": pendientesUnicos,
-//               "actividades.$.estado": "En proceso"
-//             }
-//           }
-//         );
-
-//         if (resultado.matchedCount === 0) {
-//           await ProyectosSchema.updateOne(
-//             { userId: odooUserId },
-//             {
-//               $push: {
-//                 actividades: {
-//                   ActividadId: actividadId,
-//                   pendientes: pendientesUnicos,
-//                   estado: "En proceso"
-//                 }
-//               }
-//             }
-//           );
-//         }
-
-//         console.log(`✔ Actividad ${actividadId}: ${pendientesUnicos.length} pendientes únicos`);
-//       } catch (err) {
-//         console.error(`❌ Error guardando actividad ${actividadId}:`, err.message);
-//       }
-//     }
-//     // 7️⃣ Construir prompt según el tipo de análisis
-//     let prompt = "";
-
-//     if (question.includes("otros horarios") || showAll || !mostrarSoloConTiempo) {
-//       // Prompt para mostrar TODAS las actividades
-//       prompt = `
-// Eres un asistente que analiza todas las actividades del día.
-// Usuario: ${user.firstName} (${email})
-// Proyecto principal asignado: "${proyectoPrincipal}"
-
-// Contexto: Mostrando todas las actividades del día, incluyendo las que tienen y no tienen tiempo estimado.
-
-// ${mensajeHorario}
-// Total actividades: ${actividadesFiltradas.length}
-// Total tareas: ${totalTareas} (${totalTareasConTiempo} con tiempo, ${totalTareasSinTiempo} sin tiempo)
-// Tiempo estimado de las tareas con tiempo: ${horasTotales}h ${minutosTotales}m
-
-// PROYECTO PRINCIPAL DEL DÍA (09:30-16:30):
-// "${proyectoPrincipal}"
-
-// DETALLE DE ACTIVIDADES:
-// ${actividadesFiltradas.map((actividad, index) => {
-//         const revisiones = revisionesPorActividad[actividad.id] || { pendientesConTiempo: [], pendientesSinTiempo: [] };
-//         const conTiempo = revisiones.pendientesConTiempo;
-//         const sinTiempo = revisiones.pendientesSinTiempo;
-//         const esPrincipal = actividad.horaInicio === '09:30' && actividad.horaFin === '16:30';
-//         const indicadorPrincipal = esPrincipal ? " [PROYECTO PRINCIPAL]" : "";
-
-//         let actividadTexto = `
-// ${index + 1}. ${actividad.horaInicio} - ${actividad.horaFin} - ${actividad.titulo}${indicadorPrincipal}
-//    • Proyecto: ${actividad.tituloProyecto || "Sin proyecto"}
-//    • Estado: ${actividad.status}
-//    • Total tareas: ${conTiempo.length + sinTiempo.length} (${conTiempo.length} con tiempo, ${sinTiempo.length} sin tiempo)`;
-
-//         if (conTiempo.length > 0) {
-//           actividadTexto += `
-//    • TAREAS CON TIEMPO:`;
-//           conTiempo.forEach((tarea, i) => {
-//             actividadTexto += `
-//      ${i + 1}. ${tarea.nombre}
-//         - ${tarea.duracionMin} min | Prioridad: ${tarea.prioridad} | Dias: ${tarea.diasPendiente}d`;
-//           });
-//         }
-
-//         if (sinTiempo.length > 0) {
-//           actividadTexto += `
-//    • TAREAS SIN TIEMPO:`;
-//           sinTiempo.forEach((tarea, i) => {
-//             actividadTexto += `
-//      ${i + 1}. ${tarea.nombre} (${tarea.diasPendiente}d pendiente)`;
-//           });
-//         }
-
-//         if (conTiempo.length === 0 && sinTiempo.length === 0) {
-//           actividadTexto += '\n   • Sin tareas asignadas';
-//         }
-
-//         return actividadTexto;
-//       }).join('\n')}
-
-// PREGUNTA DEL USUARIO: "${question}"
-
-// INSTRUCCIONES ESTRICTAS DE RESPUESTA:
-// 1. COMIENZA mencionando el proyecto principal: "Tu proyecto principal es '${proyectoPrincipal}'"
-// 2. Da un resumen general de todas las actividades mencionando el proyecto principal
-// 3. Diles si están al día o menciona pendientes importantes del proyecto principal
-// 4. Lista los puntos principales con viñetas relacionadas con el proyecto principal
-// 5. Al final da sugerencias específicas: "Te recomiendo que empieces con [lista de tareas DEL PROYECTO PRINCIPAL] porque [razón]"
-// 6. Pregunta si están de acuerdo con la sugerencia
-// 7. Se natural y directo
-// 8. NO uses emojis ni formato especial
-// 9. Relaciona TODO con el proyecto principal
-
-// EJEMPLO DE RESPUESTA:
-// "Tu proyecto principal es '${proyectoPrincipal}'. Estás al día con 4 actividades hoy.
-// • Para tu proyecto principal tienes 4 tareas con tiempo asignado
-// • Hay 13 tareas sin tiempo que requieren estimación
-// • La tarea de alta prioridad está relacionada con el proyecto principal
-
-// Sugerencia desde mi punto de vista: te recomiendo que empieces con la tarea de creación de rutas API de tu proyecto principal, después las correcciones y finalmente las pruebas de integración porque esta secuencia optimiza tu tiempo. ¿Estás de acuerdo?"
-// `.trim();
-//     } else {
-//       // Prompt normal (solo tareas con tiempo) - CON PROYECTO PRINCIPAL
-//       prompt = `
-// Eres un asistente que analiza actividades del día con tiempo asignado.
-// Usuario: ${user.firstName} (${email})
-// Proyecto principal asignado: "${proyectoPrincipal}"
-
-// TAREAS CON TIEMPO ASIGNADO para tu proyecto "${proyectoPrincipal}":
-// Total: ${totalTareasConTiempo} tareas | Tiempo total: ${horasTotales}h ${minutosTotales}m
-// Tareas alta prioridad: ${tareasAltaPrioridad}
-
-// ${Object.values(revisionesPorActividad).flatMap(act =>
-//         act.pendientesConTiempo.map(r =>
-//           `• ${r.nombre} - ${r.duracionMin}min (${r.prioridad}, ${r.diasPendiente}d)`
-//         )
-//       ).join('\n')}
-
-// PREGUNTA: "${question}"
-
-// INSTRUCCIONES ESTRICTAS DE RESPUESTA:
-// 1. COMIENZA mencionando el proyecto principal: "Para tu proyecto '${proyectoPrincipal}'"
-// 2. Enfócate SOLO en las tareas con tiempo asignado de este proyecto
-// 3. Da prioridad principal basada en el proyecto
-// 4. Recomendación breve relacionada con el proyecto
-// 5. Pregunta final corta relacionada con el proyecto
-// 6. MÁXIMO 4 renglones
-// 7. SIN emojis
-// 8. SIN formato especial
-
-// EJEMPLO DE RESPUESTA:
-// "Para tu proyecto '${proyectoPrincipal}', prioriza la creación de rutas API (80min, ALTA). Tienes 2h55m disponibles para este proyecto. ¿Por cuál tarea del proyecto quieres empezar?"
-// `.trim();
-//     }
-
-//     // 8️⃣ Obtener respuesta de IA
-//     const aiResult = await smartAICall(prompt);
-
-//     // ✅ Guardar respuesta del bot en historial
-//     await guardarMensajeHistorial(odooUserId, sessionId, "bot", aiResult.text);
-
-//     // 9️⃣ Preparar respuesta según el tipo
-//     let respuestaData = {
-//       actividades: actividadesFiltradas.map(a => ({
-//         id: a.id,
-//         titulo: a.titulo,
-//         horario: `${a.horaInicio} - ${a.horaFin}`,
-//         status: a.status,
-//         proyecto: a.tituloProyecto || "Sin proyecto",
-//         esPrincipal: a.horaInicio === '09:30' && a.horaFin === '16:30'
-//       })),
-//       revisionesPorActividad: {}
-//     };
-
-
-//     if (question.includes("otros horarios") || showAll) {
-//       respuestaData.revisionesPorActividad = Object.values(revisionesPorActividad)
-//         .filter(item => item.pendientesConTiempo.length > 0 || item.pendientesSinTiempo.length > 0)
-//         .map(item => ({
-//           actividadId: item.actividad.id,
-//           actividadTitulo: item.actividad.titulo,
-//           tareasConTiempo: item.pendientesConTiempo,
-//           tareasSinTiempo: item.pendientesSinTiempo,
-//           totalTareas: item.pendientesConTiempo.length + item.pendientesSinTiempo.length,
-//           tareasAltaPrioridad: item.pendientesConTiempo.filter(t => t.prioridad === "ALTA").length,
-//           tiempoTotal: item.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0)
-//         }));
-//     } else {
-//       respuestaData.revisionesPorActividad = Object.values(revisionesPorActividad)
-//         .filter(item => item.pendientesConTiempo.length > 0)
-//         .map(item => ({
-//           actividadId: item.actividad.id,
-//           actividadTitulo: item.actividad.titulo,
-//           pendientesPlanificados: item.pendientesConTiempo.length,
-//           pendientesAlta: item.pendientesConTiempo.filter(p => p.prioridad === "ALTA").length,
-//           tiempoTotal: item.pendientesConTiempo.reduce((sum, p) => sum + (p.duracionMin || 0), 0),
-//           pendientes: item.pendientesConTiempo
-//         }));
-//     }
-
-//     // 🔟 Respuesta completa
-//     return res.json({
-//       success: true,
-//       answer: aiResult.text,
-//       provider: aiResult.provider,
-//       sessionId: sessionId,
-//       proyectoPrincipal: proyectoPrincipal,
-//       metrics: {
-//         totalActividades: actividadesFiltradas.length,
-//         tareasConTiempo: totalTareasConTiempo,
-//         tareasSinTiempo: totalTareasSinTiempo,
-//         tareasAltaPrioridad: tareasAltaPrioridad,
-//         tiempoEstimadoTotal: `${horasTotales}h ${minutosTotales}m`
-//       },
-//       data: respuestaData,
-//       separadasPorTiempo: true,
-//       sugerencias: question.includes("otros horarios") || showAll ? [
-//         `¿Te gustaría estimar tiempo para las ${totalTareasSinTiempo} tareas sin tiempo de '${proyectoPrincipal}'?`,
-//         `¿Quieres que te ayude a priorizar las tareas de '${proyectoPrincipal}'?`,
-//         "¿Necesitas ayuda para organizar tu día completo?"
-//       ] : [
-//         `¿Quieres profundizar en alguna tarea de '${proyectoPrincipal}'?`,
-//         `¿Necesitas ayuda para organizar las tareas de '${proyectoPrincipal}' por tiempo?`,
-//         "¿Quieres ver todas tus actividades del día?"
-//       ]
-//     });
-
-//   } catch (error) {
-//     if (error.message === "AI_PROVIDER_FAILED") {
-//       return res.status(503).json({
-//         success: false,
-//         message: "El asistente está muy ocupado. Intenta de nuevo en un minuto."
-//       });
-//     }
-
-//     if (isGeminiQuotaError(error)) {
-//       return res.status(429).json({
-//         success: false,
-//         reason: "QUOTA_EXCEEDED",
-//         message: "El asistente está temporalmente saturado."
-//       });
-//     }
-
-//     console.error("Error:", error);
-//     return res.status(500).json({
-//       success: false,
-//       message: "Error interno"
-//     });
-//   }
-// }

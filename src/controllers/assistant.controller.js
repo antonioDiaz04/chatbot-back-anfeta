@@ -4,11 +4,10 @@ import jwt from 'jsonwebtoken';
 import { isGeminiQuotaError } from '../libs/geminiRetry.js'
 import { sanitizeObject } from '../libs/sanitize.js'
 import { smartAICall } from '../libs/aiService.js';
-import { guardarMensajeHistorial } from '../libs/guardarHistorial.js';
 import { generarSessionIdDiario } from '../libs/generarSessionIdDiario.js';
 import { horaAMinutos } from '../libs/horaAMinutos.js';
 import ActividadesSchema from "../models/actividades.model.js";
-import HistorialBot from "../models/historialBot.mode.js";
+import HistorialBot from "../models/historialBot.model.js";
 import { TOKEN_SECRET } from '../config.js';
 
 const urlApi = 'https://wlserver-production.up.railway.app/api';
@@ -39,8 +38,6 @@ export async function getActividadesConRevisiones(req, res) {
 
     const sessionId = generarSessionIdDiario(odooUserId);
 
-    // ✅ Guardar mensaje del usuario en historial
-    await guardarMensajeHistorial(odooUserId, sessionId, "usuario", question);
 
     // 1️ Obtener actividades del día para el usuario
     const actividadesResponse = await axios.get(
@@ -52,8 +49,7 @@ export async function getActividadesConRevisiones(req, res) {
     if (!Array.isArray(actividadesRaw) || actividadesRaw.length === 0) {
       const respuestaSinActividades = "No tienes actividades registradas para hoy";
 
-      // ✅ Guardar respuesta del bot en historial
-      await guardarMensajeHistorial(odooUserId, sessionId, "bot", respuestaSinActividades);
+
 
       return res.json({
         success: true,
@@ -198,9 +194,6 @@ export async function getActividadesConRevisiones(req, res) {
         mensajeError = `Tienes ${actividadesConTiempo.length} actividades con tareas con tiempo, pero ninguna en horario laboral.`;
       }
 
-      // ✅ Guardar respuesta del bot en historial
-      // await guardarMensajeHistorial(odooUserId, sessionId, "bot", mensajeError);
-
       return res.json({
         success: true,
         answer: mensajeError,
@@ -322,9 +315,6 @@ EJEMPLO DE RESPUESTA:
     //  Obtener respuesta de IA
     const aiResult = await smartAICall(prompt);
 
-    //  Guardar respuesta del bot en historial
-    await guardarMensajeHistorial(odooUserId, sessionId, "bot", aiResult.text);
-
     // 1️.1 Preparar respuesta estructurada SOLO con actividades finales
     const respuestaData = {
       actividades: actividadesFinales.map(a => ({
@@ -356,6 +346,108 @@ EJEMPLO DE RESPUESTA:
         .filter(item => item !== null) // Filtrar nulos
     };
 
+    // ✅ GUARDAR EN HISTORIAL - Registrar tareas conocidas y mensaje del bot
+    const analisisCompleto = {
+      success: true,
+      answer: aiResult.text,
+      provider: aiResult.provider,
+      sessionId: sessionId,
+      proyectoPrincipal: proyectoPrincipal,
+      metrics: {
+        totalActividades: actividadesFiltradas.length,
+        totalPendientes: totalTareasConTiempo,
+        pendientesAltaPrioridad: tareasAltaPrioridad,
+        tiempoEstimadoTotal: `${horasTotales}h ${minutosTotales}m`,
+        actividadesConPendientes: actividadesFinales.length,
+        tareasConTiempo: totalTareasConTiempo,
+        tareasSinTiempo: totalTareasSinTiempo,
+        tareasAltaPrioridad: tareasAltaPrioridad
+      },
+      data: respuestaData,
+      separadasPorTiempo: true,
+      sugerencias: []
+    };
+
+    // Construir tareasEstado desde las revisiones
+    const tareasEstadoArray = respuestaData.revisionesPorActividad.flatMap(r =>
+      (r.tareasConTiempo || []).map(t => ({
+        taskId: t.id,
+        taskName: t.nombre,
+        actividadTitulo: r.actividadTitulo,
+        explicada: false,
+        validada: false,
+        explicacion: "",
+        ultimoIntento: null
+      }))
+    );
+
+    // Guardar historial con mensaje del usuario, respuesta del bot y tareas conocidas
+    await HistorialBot.findOneAndUpdate(
+      { userId: odooUserId, sessionId },
+      {
+        $setOnInsert: {
+          userId: odooUserId,
+          sessionId
+        },
+        $set: {
+          tareasEstado: tareasEstadoArray,
+          ultimoAnalisis: analisisCompleto,
+          estadoConversacion: "mostrando_actividades"
+        },
+        $push: {
+          mensajes: {
+            $each: [
+              {
+                role: "usuario",
+                contenido: question,
+                timestamp: new Date(),
+                tipoMensaje: "texto",
+                analisis: null
+              },
+              {
+                role: "bot",
+                contenido: aiResult.text,
+                timestamp: new Date(),
+                tipoMensaje: "analisis_inicial",
+                analisis: analisisCompleto
+              }
+            ]
+          }
+        }
+      },
+      { upsert: true, new: true }
+    );
+
+    await ActividadesSchema.findOneAndUpdate(
+      { odooUserId: odooUserId },
+      {
+        $set: {
+          odooUserId: odooUserId,
+          actividades: respuestaData.revisionesPorActividad.map(rev => ({
+            actividadId: rev.actividadId,
+            titulo: rev.actividadTitulo,
+            horaInicio: rev.actividadHorario.split(' - ')[0],
+            horaFin: rev.actividadHorario.split(' - ')[1],
+            status: "activo",
+            fecha: new Date().toISOString().split('T')[0],
+            pendientes: rev.tareasConTiempo.map(t => ({
+              pendienteId: t.id,
+              nombre: t.nombre,
+              descripcion: "",
+              terminada: t.terminada,
+              confirmada: t.confirmada,
+              duracionMin: t.duracionMin,
+              fechaCreacion: t.fechaCreacion,
+              fechaFinTerminada: t.fechaFinTerminada,
+            })),
+            ultimaActualizacion: new Date()
+          })),
+          ultimaSincronizacion: new Date()
+        }
+      },
+      { upsert: true, new: true }
+    );
+
     // 1️.2 Respuesta completa
     return res.json({
       success: true,
@@ -381,12 +473,6 @@ EJEMPLO DE RESPUESTA:
         soloTareasConTiempo: true,
         excluirTareasSinTiempo: true
       }
-      // sugerencias: [
-      //   `¿Quieres ver las ${Array.from(actividadesConRevisionesConTiempoIds).length} actividades con tareas con tiempo (incluyendo fuera de horario)?`,
-      //   `¿Te gustaría estimar tiempo para las ${totalTareasSinTiempo} tareas sin tiempo?`,
-      //   "¿Quieres priorizar solo las tareas de alta prioridad?",
-      //   "¿Necesitas ayuda para organizar mejor tu tiempo?"
-      // ]
     });
 
   } catch (error) {
@@ -426,13 +512,6 @@ export async function devuelveActividades(req, res) {
 
     const sessionId = generarSessionIdDiario(sessionUserId);
 
-    // ✅ Guardar consulta del usuario en historial
-    await guardarMensajeHistorial(
-      sessionUserId,
-      sessionId,
-      "usuario",
-      `Consulta de actividades del día para ${email}`
-    );
 
     const response = await axios.get(
       `${urlApi}/actividades/assignee/${email}/del-dia`
@@ -441,13 +520,7 @@ export async function devuelveActividades(req, res) {
     const actividadesRaw = response.data.data;
 
     if (!Array.isArray(actividadesRaw)) {
-      // ✅ Guardar respuesta del bot en historial
-      await guardarMensajeHistorial(
-        sessionUserId,
-        sessionId,
-        "bot",
-        "No se encontraron actividades (respuesta inválida)"
-      );
+
       return res.json([]);
     }
 
@@ -461,13 +534,8 @@ export async function devuelveActividades(req, res) {
 
     // 2. Si no hay actividad en ese horario, retornar array vacío
     if (!actividadSeleccionada) {
-      // ✅ Guardar respuesta del bot en historial
-      await guardarMensajeHistorial(
-        sessionUserId,
-        sessionId,
-        "bot",
-        "No hay actividades en horario 09:30-16:30"
-      );
+
+      // );
       return res.json([]);
     }
 
@@ -488,14 +556,6 @@ export async function devuelveActividades(req, res) {
     const actividadesFiltradas = resultado.h != null && resultado.h !== ""
       ? [resultado]
       : [];
-
-    // ✅ Guardar respuesta del bot en historial
-    await guardarMensajeHistorial(
-      sessionUserId,
-      sessionId,
-      "bot",
-      `Actividad encontrada: "${resultado.t}" con ${resultado.p} pendientes`
-    );
 
     return res.json(actividadesFiltradas);
 
@@ -525,14 +585,6 @@ export async function devuelveActReviciones(req, res) {
 
 
     const sessionId = generarSessionIdDiario(odooUserId);;
-
-    // ✅ Guardar consulta del usuario en historial
-    await guardarMensajeHistorial(
-      odooUserId,
-      sessionId,
-      "usuario",
-      `Consulta de revisiones para ${idsAct.length} actividades`
-    );
 
     const today = new Date();
     const formattedToday = today.toISOString().split('T')[0];
@@ -590,14 +642,6 @@ export async function devuelveActReviciones(req, res) {
     const resultado = Array.from(actividadesRevi.values());
     const totalPendientes = resultado.reduce((sum, act) => sum + act.pendientes.length, 0);
 
-    // ✅ Guardar respuesta del bot en historial
-    await guardarMensajeHistorial(
-      odooUserId,
-      sessionId,
-      "bot",
-      `Se encontraron ${resultado.length} actividades con ${totalPendientes} pendientes totales.`
-    );
-
     return res.status(200).json({
       success: true,
       sessionId: sessionId,
@@ -620,261 +664,96 @@ export async function devuelveActReviciones(req, res) {
   }
 }
 
-export async function guardarPendientes(req, res) {
+export async function guardarExplicaciones(req, res) {
   try {
-
-    const { answer, data } = sanitizeObject(req.body);
-
-    const { token } = req.cookies;
-    const decoded = jwt.verify(token, TOKEN_SECRET);
-    const userId = decoded.id;
-
-    if (
-      !userId ||
-      !data?.actividades?.length ||
-      !data?.revisionesPorActividad?.length
-    ) {
-      return res.status(400).json({
-        error: "JSON incompleto para guardar pendientes"
-      });
-    }
-
-    const actividad = data.actividades[0];
-    const revision = data.revisionesPorActividad.find(
-      r => r.actividadId === actividad.id
-    );
-
-    if (!revision) {
-      return res.status(400).json({
-        error: "No hay revisión para la actividad"
-      });
-    }
-
-    // 🔁 Mapear pendientes al schema real
-    const pendientesMapeados = revision.pendientes.map(p => ({
-      pendienteId: p.id,
-      nombre: p.nombre,
-      descripcion: "",
-      estado: p.terminada ? "completado" : "pendiente"
-    }));
-
-    const sessionId = generarSessionIdDiario(userId);
-
-    // 🧠 Guardar mensaje usuario
-    await guardarMensajeHistorial(
-      userId,
-      sessionId,
-      "usuario",
-      `Guardando ${pendientesMapeados.length} pendientes`
-    );
-
-    // 🔍 Buscar o crear actividad
-    const actividadDB = await ActividadesSchema.findOneAndUpdate(
-      {
-        userId,
-        nombre: actividad.titulo
-      },
-      {
-        $setOnInsert: {
-          userId,
-          nombre: actividad.titulo
-        },
-        $push: {
-          pendientes: { $each: pendientesMapeados }
-        }
-      },
-      {
-        new: true,
-        upsert: true
-      }
-    );
-
-    // 🧠 Guardar análisis completo en historial
-    await HistorialBot.findOneAndUpdate(
-      { userId, sessionId },
-      {
-        $push: {
-          mensajes: {
-            role: "bot",
-            contenido: answer,
-            tipoMensaje: "respuesta_ia",
-            analisis: body
-          }
-        },
-        $set: {
-          ultimoAnalisis: body,
-          estadoConversacion: "finalizado"
-        }
-      },
-      { upsert: true }
-    );
-
-    res.status(201).json({
-      success: true,
-      actividad: actividadDB.nombre,
-      pendientesGuardados: pendientesMapeados.length,
-      sessionId
-    });
-
-  } catch (error) {
-    console.error("Error en guardarPendientes:", error);
-    res.status(500).json({ error: error.message });
-  }
-}
-
-
-/**
- * Obtiene el historial de una sesión específica
- */
-
-export async function obtenerHistorialSesion(req, res) {
-  try {
+    const { explanations, sessionId } = req.body;
     const { token } = req.cookies;
 
-    if (!token) {
-      return res.status(401).json({ success: false, message: "No autenticado" });
+    // Verificamos el token para obtener el ID de Odoo
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const odooUserId = decoded.id; 
+
+    if (!Array.isArray(explanations)) {
+      return res.status(400).json({ error: "No se recibieron explicaciones válidas" });
     }
 
-    const decoded = jwt.verify(token, TOKEN_SECRET);
-    const userId = decoded.id;
+    // 1. Buscamos el documento raíz del usuario
+    let registroUsuario = await ActividadesSchema.findOne({ odooUserId });
 
-
-    const sessionId = generarSessionIdDiario(userId);
-
-    // Buscamos el historial y los proyectos en paralelo
-    const [historial, actividades] = await Promise.all([
-      HistorialBot.findOne({ userId, sessionId }).lean(),
-      ActividadesSchema.findOne({ userId }).lean()
-    ]);
-
-    if (!historial) {
-      return res.json({
-        success: true,
-        data: null,
-        actividades: actividades || null
+    // Si no existe, lo creamos (odooUserId es requerido)
+    if (!registroUsuario) {
+      registroUsuario = await ActividadesSchema.create({
+        odooUserId,
+        actividades: []
       });
     }
 
-    // Lógica de filtrado: solo actividades que tengan revisión (pendientes)
-    if (
-      historial.data &&
-      Array.isArray(historial.data.revisionesPorActividad) &&
-      Array.isArray(historial.data.actividades)
-    ) {
-      const idsConRevision = new Set(
-        historial.data.revisionesPorActividad.map(r => r.actividadId)
+    // 2. Procesamos cada explicación
+    for (const exp of explanations) {
+      // Buscamos si la actividad ya existe en el array del usuario
+      let actividad = registroUsuario.actividades.find(
+        (a) => a.titulo === exp.activityTitle
       );
 
-      historial.data.actividades = historial.data.actividades.filter(
-        actividad => idsConRevision.has(actividad.id)
-      );
-    }
+      // Si la actividad no existe, la agregamos al array
+      if (!actividad) {
 
-
-    return res.json({
-      success: true,
-      data: historial,
-      actividades: actividades || null
-    });
-
-  } catch (error) {
-    console.error("Error al obtener sesión específica:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Error interno del servidor"
-    });
-  }
-}
-
-
-/**
- * Obtiene todos los historiales de un usuario con paginación
- */
-export async function obtenerHistorialesUsuario(req, res) {
-  try {
-    const { limit = 10, skip = 0 } = sanitizeObject(req.query);
-
-    const { token } = req.cookies;
-    const decoded = jwt.verify(token, TOKEN_SECRET);
-    const odooUserId = decoded.id;
-
-
-
-    if (!odooUserId) {
-      return res.status(400).json({
-        success: false,
-        message: "odooUserId es requerido"
-      });
-    }
-
-    const historiales = await HistorialBot.find({ odooUserId })
-      .sort({ updatedAt: -1 })
-      .limit(parseInt(limit))
-      .skip(parseInt(skip));
-
-    const total = await HistorialBot.countDocuments({ odooUserId });
-
-    return res.json({
-      success: true,
-      data: historiales,
-      pagination: {
-        total,
-        limit: parseInt(limit),
-        skip: parseInt(skip),
-        hasMore: (parseInt(skip) + historiales.length) < total
+        console.log("Actividad no encontrada, creando...");
+        registroUsuario.actividades.push({
+          actividadId: `ACT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          titulo: exp.activityTitle,
+          fecha: new Date().toISOString().split('T')[0],
+          pendientes: []
+        });
+        // Referenciamos la actividad recién creada
+        actividad = registroUsuario.actividades[registroUsuario.actividades.length - 1];
       }
+
+      // 3. Buscamos si el pendiente ya existe dentro de esa actividad
+      const pendienteIndex = actividad.pendientes.findIndex(
+        (p) => p.pendienteId === exp.taskId
+      );
+
+      const datosPendiente = {
+        pendienteId: exp.taskId,
+        nombre: exp.taskName,
+        descripcion: exp.explanation || '', // <--- ¡Ahora sí se guarda!
+        terminada: exp.confirmed || false,
+        confirmada: exp.confirmed || false,
+        duracionMin: exp.duration || 0,
+        fechaCreacion: new Date()
+      };
+
+      if (pendienteIndex !== -1) {
+        // Actualizamos el pendiente existente (mezclando datos)
+        actividad.pendientes[pendienteIndex] = {
+          ...actividad.pendientes[pendienteIndex].toObject(),
+          ...datosPendiente
+        };
+      } else {
+        // Agregamos el nuevo pendiente si no existía
+        actividad.pendientes.push(datosPendiente);
+      }
+    }
+
+    // 4. Guardamos los cambios en la base de datos
+    registroUsuario.ultimaSincronizacion = new Date();
+    
+    // Al usar .save() en el documento raíz, Mongoose valida todo el árbol
+    await registroUsuario.save();
+
+    return res.status(200).json({ 
+      success: true, 
+      message: "Explicaciones guardadas con éxito",
+      total: explanations.length,
+      sessionId 
     });
 
   } catch (error) {
-    console.error("Error obteniendo historiales:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Error interno"
-    });
-  }
-}
-
-/**
- * Elimina el historial de una sesión específica
- */
-export async function eliminarHistorialSesion(req, res) {
-  try {
-    const { sessionId } = sanitizeObject(req.body);
-
-
-
-    const { token } = req.cookies;
-    const decoded = jwt.verify(token, TOKEN_SECRET);
-    const odooUserId = decoded.id;
-
-
-
-    if (!odooUserId || !sessionId) {
-      return res.status(400).json({
-        success: false,
-        message: "odooUserId y sessionId son requeridos"
-      });
-    }
-
-    const resultado = await HistorialBot.deleteOne({ odooUserId, sessionId });
-
-    if (resultado.deletedCount === 0) {
-      return res.status(404).json({
-        success: false,
-        message: "No se encontró historial para eliminar"
-      });
-    }
-
-    return res.json({
-      success: true,
-      message: "Historial eliminado correctamente"
-    });
-
-  } catch (error) {
-    console.error("Error eliminando historial:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Error interno"
+    console.error("Error en guardarExplicaciones:", error);
+    return res.status(500).json({ 
+      success: false, 
+      error: error.message 
     });
   }
 }
@@ -929,249 +808,41 @@ export async function confirmarEstadoPendientes(req, res) {
   }
 }
 
-/**
- * Función 2 - Versión local simplificada para pruebas
- * Solo procesa 2 tareas de ejemplo sin conexiones externas
- */
-export async function getActividadesLocal(req, res) {
-  try {
-    const { email, question = "¿Qué tengo pendiente hoy?" } = req.body;
-
-    if (!email) {
-      return res.status(400).json({
-        success: false,
-        message: "El email es requerido"
-      });
-    }
-
-    // ID de sesión simple
-    const sessionId = `local_${Date.now()}`;
-
-    // 1. Datos de usuario local (simulado)
-    const usuarioLocal = {
-      id: 1,
-      email: email,
-      firstName: "Usuario",
-      lastName: "Demo",
-      role: "developer"
-    };
-
-    // 2. Actividades locales fijas (solo 2)
-    const actividadesLocales = [
-      {
-        id: 101,
-        titulo: "Revisar documentación técnica",
-        horaInicio: "09:00",
-        horaFin: "10:30",
-        status: "Pendiente",
-        tituloProyecto: "Proyecto Local Alpha"
-      },
-      {
-        id: 102,
-        titulo: "Corregir errores en formulario",
-        horaInicio: "11:00",
-        horaFin: "12:00",
-        status: "En progreso",
-        tituloProyecto: "Proyecto Local Beta"
-      }
-    ];
-
-    // 3. Revisiones locales fijas (asociadas a las 2 actividades)
-    const fechaAyer = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-
-    const revisionesLocales = {
-      colaboradores: [
-        {
-          items: {
-            actividades: [
-              {
-                id: 101,
-                pendientes: [
-                  {
-                    id: 201,
-                    nombre: "Revisar API endpoints",
-                    terminada: false,
-                    confirmada: false,
-                    duracionMin: 45,
-                    fechaCreacion: fechaAyer,
-                    assignees: [{ name: email }]
-                  },
-                  {
-                    id: 202,
-                    nombre: "Actualizar diagramas",
-                    terminada: true,
-                    confirmada: true,
-                    duracionMin: 30,
-                    fechaCreacion: fechaAyer,
-                    assignees: [{ name: email }]
-                  }
-                ]
-              },
-              {
-                id: 102,
-                pendientes: [
-                  {
-                    id: 203,
-                    nombre: "Validar inputs del formulario",
-                    terminada: false,
-                    confirmada: false,
-                    duracionMin: 0, // Sin tiempo asignado
-                    fechaCreacion: fechaAyer,
-                    assignees: [{ name: email }]
-                  }
-                ]
-              }
-            ]
-          }
-        }
-      ]
-    };
-    // 4. Procesar revisiones para cada actividad
-    const revisionesPorActividad = {};
-
-    actividadesLocales.forEach(actividad => {
-      const actividadRevisiones = revisionesLocales.colaboradores[0].items.actividades
-        .find(a => a.id === actividad.id);
-
-      revisionesPorActividad[actividad.id] = {
-        actividad: {
-          id: actividad.id,
-          titulo: actividad.titulo,
-          horaInicio: actividad.horaInicio,
-          horaFin: actividad.horaFin,
-          status: actividad.status,
-          proyecto: actividad.tituloProyecto
-        },
-        pendientesConTiempo: [],
-        pendientesSinTiempo: []
-      };
-
-      if (actividadRevisiones && actividadRevisiones.pendientes) {
-        actividadRevisiones.pendientes.forEach(pendiente => {
-          const pendienteInfo = {
-            id: pendiente.id,
-            nombre: pendiente.nombre,
-            terminada: pendiente.terminada,
-            confirmada: pendiente.confirmada,
-            duracionMin: pendiente.duracionMin || 0,
-            fechaCreacion: pendiente.fechaCreacion,
-            diasPendiente: pendiente.fechaCreacion ?
-              Math.floor((new Date() - new Date(pendiente.fechaCreacion)) / (1000 * 60 * 60 * 24)) : 0
-          };
-
-          if (pendiente.duracionMin && pendiente.duracionMin > 0) {
-            pendienteInfo.prioridad = pendiente.duracionMin > 60 ? "ALTA" :
-              pendiente.duracionMin > 30 ? "MEDIA" : "BAJA";
-            revisionesPorActividad[actividad.id].pendientesConTiempo.push(pendienteInfo);
-          } else {
-            pendienteInfo.prioridad = "SIN TIEMPO";
-            revisionesPorActividad[actividad.id].pendientesSinTiempo.push(pendienteInfo);
-          }
-        });
-      }
-    });
-
-    // 5. Calcular métricas simples
-    let totalTareasConTiempo = 0;
-    let totalTareasSinTiempo = 0;
-    let tiempoTotalEstimado = 0;
-
-    Object.values(revisionesPorActividad).forEach(actividad => {
-      totalTareasConTiempo += actividad.pendientesConTiempo.length;
-      totalTareasSinTiempo += actividad.pendientesSinTiempo.length;
-      tiempoTotalEstimado += actividad.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0);
-    });
-
-    const horasTotales = Math.floor(tiempoTotalEstimado / 60);
-    const minutosTotales = tiempoTotalEstimado % 60;
-
-    // 6. Respuesta local sin IA
-    const respuestaLocal = `
-Hola ${usuarioLocal.firstName},
-
-Tienes 2 actividades locales programadas para hoy:
-
-1. Revisar documentación técnica (09:00-10:30)
-   • 2 tareas: 1 pendiente (45min), 1 completada
-
-2. Corregir errores en formulario (11:00-12:00)
-   • 1 tarea sin tiempo estimado
-
-Total: ${totalTareasConTiempo} tareas con tiempo (${horasTotales}h ${minutosTotales}m), 
-${totalTareasSinTiempo} tareas sin tiempo.
-
-¿En qué actividad te gustaría enfocarte primero?
-    `.trim();
-
-    // 7. Devolver respuesta estructurada
-    return res.json({
-      success: true,
-      answer: respuestaLocal,
-      sessionId: sessionId,
-      source: "local_demo",
-      metrics: {
-        totalActividades: actividadesLocales.length,
-        tareasConTiempo: totalTareasConTiempo,
-        tareasSinTiempo: totalTareasSinTiempo,
-        tiempoEstimadoTotal: `${horasTotales}h ${minutosTotales}m`
-      },
-      data: {
-        actividades: actividadesLocales.map(a => ({
-          id: a.id,
-          titulo: a.titulo,
-          horario: `${a.horaInicio} - ${a.horaFin}`,
-          status: a.status,
-          proyecto: a.tituloProyecto
-        })),
-        revisionesPorActividad: Object.values(revisionesPorActividad).map(item => ({
-          actividadId: item.actividad.id,
-          actividadTitulo: item.actividad.titulo,
-          tareasConTiempo: item.pendientesConTiempo,
-          tareasSinTiempo: item.pendientesSinTiempo,
-          totalTareas: item.pendientesConTiempo.length + item.pendientesSinTiempo.length
-        }))
-      },
-      sugerencias: [
-        "¿Quieres marcar alguna tarea como completada?",
-        "¿Necesitas agregar tiempo estimado a las tareas sin tiempo?",
-        "¿Quieres ver más detalles de alguna actividad?"
-      ],
-      nota: "Esta es una versión local de demostración con datos fijos"
-    });
-
-  } catch (error) {
-    console.error("Error en función local:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Error en función local",
-      error: error.message
-    });
-  }
-}
-
 export async function validarExplicacion(req, res) {
   try {
     const { taskName, explanation, activityTitle } = sanitizeObject(req.body);
     const cleanTitle = activityTitle.replace(/,/g, ' ');
 
+    const { token } = req.cookies;
+
+
+
+    console.log(explanation)
+
     const prompt = `
-Eres un Analista de Productividad Técnico. Tu misión es evaluar si la explicación de un desarrollador sobre una tarea pendiente es válida o es una evasión.
+Eres un asistente que verifica si un comentario está relacionado
+con una tarea específica o con algo necesario para poder trabajar en ella hoy.
 
 CONTEXTO:
 - Actividad: "${cleanTitle}"
-- Tarea Pendiente: "${taskName}"
-- Explicación del usuario: "${explanation}"
+- Tarea: "${taskName}"
+- Comentario del usuario: "${explanation}"
 
-REGLAS DE EVALUACIÓN:
-1. VALIDEZ: Es válida si hay un bloqueo real (dependencias, falta de info) o un plan técnico claro (ej. "lo haré mañana tras definir la DB").
-2. EVASIÓN: Es inválida si es vaga (ej. "luego", "al terminar", "después lo veo") sin explicar el PORQUÉ técnico o el QUÉ hará después.
+INSTRUCCIONES:
+- Considera relacionado si el comentario:
+  - Describe acciones sobre la tarea, o
+  - Menciona algo necesario para poder avanzar en ella hoy
+    (por ejemplo: herramientas, equipo, bloqueos prácticos).
+- No evalúes calidad, detalle ni redacción.
+- Comentarios breves o informales son aceptables.
+- Solo marca como no relacionado si habla de un tema totalmente distinto
+  o no se entiende ninguna intención.
 
-TU RESPUESTA DEBE SER ÚNICAMENTE ESTE JSON:
+RESPONDE ÚNICAMENTE EN JSON:
 {
-  "valida": boolean,
-  "categoriaMotivo": "AVANCE_CONCRETO" | "EVASION_O_VAGO" | "BLOQUEO_TECNICO",
-  "razon": "Frase corta (máx 15 palabras) explicando el veredicto.",
-  "pista": "Pregunta de 10 palabras para que el usuario mejore su respuesta (vacío si valida es true)."
+  "esDelTema": true o false,
+  "razon": "Frase corta (máx 10 palabras)",
+  "sugerencia": "Pregunta corta para orientar al usuario (vacía si esDelTema es true)"
 }
 `;
 
@@ -1190,18 +861,22 @@ TU RESPUESTA DEBE SER ÚNICAMENTE ESTE JSON:
 
     const resultadoIA = JSON.parse(jsonMatch[0]);
 
+    console.log(resultadoIA);
+
+
     // Estructura de respuesta final (reutilizable para la misma ruta)
     const respuesta = {
-      valida: !!resultadoIA.valida,
+      valida: resultadoIA.esDelTema === true,
       categoriaMotivo: resultadoIA.categoriaMotivo || "INSUFICIENTE",
       razon: resultadoIA.razon || "Revisión técnica necesaria.",
-      sugerencia: resultadoIA.pista || (resultadoIA.valida ? "" : "Proporciona más detalles técnicos.")
+      sugerencia: resultadoIA.sugerencia,
     };
 
     // Log para monitoreo interno
     if (!respuesta.valida) {
       console.log(`[Validación Fallida] Tarea: ${taskName} | Motivo: ${respuesta.categoriaMotivo}`);
     }
+
 
     return res.json(respuesta);
 
@@ -1214,96 +889,95 @@ TU RESPUESTA DEBE SER ÚNICAMENTE ESTE JSON:
   }
 }
 
-export async function guardarExplicaciones(req, res) {
+// export async function guardarPendientes (req, res) {
+
+// }
+
+export async function obtenerHistorialSesion(req, res) {
   try {
-    const { explanations } = sanitizeObject(req.body);
-
-    console.log(explanations);
-
     const { token } = req.cookies;
+
     if (!token) {
-      return res.status(401).json({
-        success: false,
-        message: "Token requerido"
+      return res.status(401).json({ success: false, message: "No autenticado" });
+    }
+
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const userId = decoded.id; // Este es el OdooUserId de 32 caracteres
+
+    const sessionId = generarSessionIdDiario(userId);
+
+    // 1️⃣ Obtener historial de la conversación (HistorialBot)
+    const historial = await HistorialBot.findOne({ userId, sessionId }).lean();
+
+    // 2️⃣ Obtener actividades del usuario (ActividadesSchema)
+    // Aquí es donde está la información que guardamos con 'guardarExplicaciones'
+    const actividadesCache = await ActividadesSchema.findOne({
+      odooUserId: userId
+    }).lean();
+
+    // 3️⃣ Procesar datos de actividades (incluyendo la nueva descripción)
+    const actividadesProcesadas = actividadesCache ? {
+      odooUserId: actividadesCache.odooUserId,
+      ultimaSincronizacion: actividadesCache.ultimaSincronizacion,
+      actividades: (actividadesCache.actividades || []).map(act => ({
+        actividadId: act.actividadId,
+        titulo: act.titulo,
+        tituloProyecto: act.tituloProyecto,
+        status: act.status,
+        fecha: act.fecha,
+        // Mapeamos los pendientes incluyendo la descripción (la explicación de voz)
+        pendientes: (act.pendientes || []).map(p => ({
+          pendienteId: p.pendienteId,
+          nombre: p.nombre,
+          descripcion: p.descripcion || "", // <--- IMPORTANTE: Recuperamos la explicación
+          terminada: p.terminada,
+          confirmada: p.confirmada,
+          duracionMin: p.duracionMin,
+          fechaCreacion: p.fechaCreacion,
+          fechaFinTerminada: p.fechaFinTerminada
+        }))
+      }))
+    } : null;
+
+    // 4️⃣ Si no hay historial de chat pero sí hay actividades, devolvemos las actividades
+    if (!historial) {
+      return res.json({
+        success: true,
+        data: null,
+        actividades: actividadesProcesadas,
+        cache: {
+          disponible: !!actividadesCache,
+          ultimaSincronizacion: actividadesCache?.ultimaSincronizacion || null
+        }
       });
     }
 
-    const { id: userId } = jwt.verify(token, TOKEN_SECRET);
-
-    if (!Array.isArray(explanations) || explanations.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: "No hay explicaciones para guardar"
-      });
-    }
-
-    let totalGuardadas = 0;
-
-    for (const exp of explanations) {
-      const {
-        taskId,
-        taskName,
-        explanation,
-        confirmed,
-        activityTitle,
-        duration,
-        priority
-      } = exp;
-
-      if (!taskId || !taskName || !explanation || !activityTitle) continue;
-
-      // Busca la actividad
-      let actividad = await ActividadesSchema.findOne({
-        userId,
-        nombre: activityTitle
-      });
-
-      if (!actividad) {
-        actividad = await ActividadesSchema.create({
-          userId,
-          nombre: activityTitle,
-          pendientes: []
-        });
-      }
-
-      // Verifica si ya existe el pendiente
-      const pendienteExistente = actividad.pendientes.find(
-        p => p.pendienteId === taskId
-      );
-
-      if (pendienteExistente) {
-        // Actualiza si ya existe
-        pendienteExistente.descripcion = explanation;
-        pendienteExistente.estado = confirmed ? "completado" : "pendiente";
-        pendienteExistente.duracionMin = duration ?? pendienteExistente.duracionMin;
-        pendienteExistente.prioridad = priority ?? pendienteExistente.prioridad;
-      } else {
-        // Crea un nuevo pendiente
-        actividad.pendientes.push({
-          pendienteId: taskId,
-          nombre: taskName,
-          descripcion: explanation,
-          estado: confirmed ? "completado" : "pendiente",
-          duracionMin: duration ?? 0,
-          prioridad: priority ?? "BAJA"
-        });
-      }
-
-      await actividad.save();
-      totalGuardadas++;
-    }
-
-    return res.status(200).json({
+    // 5️⃣ Retornar respuesta unificada
+    return res.json({
       success: true,
-      message: "Pendientes guardados correctamente",
-      totalGuardadas
+      data: {
+        ...historial,
+        // Aseguramos que el 'ultimoAnalisis' también refleje los cambios si es necesario
+        ultimoAnalisis: historial.ultimoAnalisis 
+      },
+      actividades: actividadesProcesadas,
+      cache: {
+        disponible: !!actividadesCache,
+        ultimaSincronizacion: actividadesCache?.ultimaSincronizacion || null,
+        totalActividades: actividadesCache?.actividades?.length || 0
+      },
+      meta: {
+        userId,
+        sessionId,
+        timestamp: new Date().toISOString()
+      }
     });
 
   } catch (error) {
-    console.error("Error en guardarExplicaciones:", error);
+    console.error("❌ Error al obtener sesión:", error);
     return res.status(500).json({
       success: false,
-      message: "Error interno al guardar explicaciones",
+      message: "Error interno del servidor",
       error: error.message
     });
   }

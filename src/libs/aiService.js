@@ -50,33 +50,38 @@ async function llamarGroqConRespaldo(prompt) {
 /**
  * Función principal de llamada inteligente (Gemini -> Groq Pool)
  */
-export async function smartAICall(prompt, retries = 1) {
+/**
+ * Función principal de llamada inteligente (Groq Pool -> Gemini Backup)
+ */
+export async function smartAICall(prompt) {
+    // 1. INTENTO PRINCIPAL: Pool de Groq
+    console.log("🚀 Iniciando petición con Groq (Prioridad Alta)...");
     try {
+        const groqResult = await llamarGroqConRespaldo(prompt);
+        return groqResult; // Si funciona, termina aquí.
+    } catch (groqError) {
+        console.error("⚠️ Falló el pool de Groq o todas las cuentas están saturadas.");
+        
+        // 2. RESPALDO (FAILOVER): Gemini
+        console.warn("🔄 Entrando a Gemini como respaldo de emergencia...");
+        try {
+            const geminiResult = await callGeminiWithRetry(async () => {
+                const model = genAI.getGenerativeModel({ 
+                    model: 'gemini-1.5-flash' // El 2.5-lite es experimental, 1.5-flash es más estable
+                });
+                const response = await model.generateContent(prompt);
+                return { 
+                    text: response.response.text(), 
+                    provider: 'Gemini (Backup)' 
+                };
+            }, 1); // Solo un reintento para no perder tiempo si los tokens están agotados
 
-
-        const geminiResponse = await callGeminiWithRetry(() => genAI.models.generateContent({
-            // model: 'gemini-2.0-flash',
-            model: 'gemini-2.5-flash-lite',
-            contents: prompt,
-        }));
-        return { text: geminiResponse.text, provider: 'Gemini' };
-
-    } catch (error) {
-        console.error(`Gemini: ${error.message}`);
-        const isQuota = isGeminiQuotaError(error);
-
-        if (isQuota || retries <= 0) {
-            console.warn(" Gemini agotado. Entrando al pool de Groq...");
-            try {
-                return await llamarGroqConRespaldo(prompt);
-            } catch (finalError) {
-                console.error(" CRÍTICO: Todos los proveedores de IA fallaron (numero de peticiones gratuitas por minutos rebasadas), por favor espere un minuto");
-                throw new Error("AI_PROVIDER_FAILED");
-            }
+            return geminiResult;
+        } catch (geminiError) {
+            console.error("❌ CRÍTICO: Falló Groq y también falló Gemini.");
+            
+            // Si llegamos aquí, realmente no hay servicio disponible
+            throw new Error("AI_PROVIDER_FAILED");
         }
-
-        console.warn(`Reintentando Gemini... (${retries} restantes)`);
-        await new Promise(r => setTimeout(r, 2000));
-        return smartAICall(prompt, retries - 1);
     }
 }

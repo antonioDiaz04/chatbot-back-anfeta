@@ -1,60 +1,48 @@
 import mongoose from "mongoose";
 
-const PendienteSchema = new mongoose.Schema({
-    pendienteId: {
-        type: String,
-        required: true,
-    },
-    nombre: {
-        type: String,
-        required: true
-    },
-    descripcion: {
-        type: String,
-        required: true
-    },
-    duracionMin: {
-        type: Number,
-        default: 0,
-        required: true
-    },
-    prioridad: {
-        type: String,
-        default: "BAJA"
-    },
-    estado: {
-        type: String,
-        enum: ["pendiente", "completado", "cancelado"],
-        default: "pendiente"
-    }
-});
-
-const ActividadesSchema = new mongoose.Schema(
-    {
-        userId: {
-            type: mongoose.Schema.Types.ObjectId,
-            ref: "User",
-            required: true,
-            unique: true
-        },
-        pendientes: {
-            type: [PendienteSchema],
-            default: []
-        },
-        nombre: {
-            type: String,
-            required: true,
-            unique: true
-        }
-    },
-    { timestamps: true }
+const pendienteSchema = new mongoose.Schema(
+  {
+    pendienteId: String,
+    nombre: String,
+    descripcion: String,
+    terminada: { type: Boolean, default: false },
+    confirmada: { type: Boolean, default: false },
+    duracionMin: { type: Number, default: 0 },
+    fechaCreacion: Date,
+    fechaFinTerminada: Date,
+  },
+  { _id: false }
 );
 
-ActividadesSchema.index({ userId: 1 });
-ActividadesSchema.index({ userId: 1, nombre: 1 }, { unique: true });
-
-
-export default mongoose.model(
-    "ActividadesSchema",
-    ActividadesSchema
+const actividadSchema = new mongoose.Schema(
+  {
+    actividadId: { type: String, required: true },
+    titulo: String,
+    tituloProyecto: String,
+    horaInicio: String,
+    horaFin: String,
+    status: String,
+    fecha: String,
+    pendientes: [pendienteSchema],
+    ultimaActualizacion: { type: Date, default: Date.now },
+  },
+  { _id: false }
 );
+
+const actividadesSchema = new mongoose.Schema(
+  {
+    odooUserId: { type: String, required: true},
+    actividades: [actividadSchema],
+    ultimaSincronizacion: { type: Date, default: Date.now },
+  },
+  { timestamps: true }
+);
+
+// Índices para búsquedas rápidas
+actividadesSchema.index({ odooUserId: 1 });
+actividadesSchema.index({ "actividades.actividadId": 1 });
+actividadesSchema.index({ "actividades.fecha": 1 });
+
+const ActividadesSchema = mongoose.model("Actividades", actividadesSchema);
+
+export default ActividadesSchema;

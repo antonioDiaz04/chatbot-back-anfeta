@@ -20,7 +20,7 @@ export const signIn = async (req, res) => {
 
 
     const token = await createAccessToken({
-      id: userFound._id,
+      id: userFound.collaboratorId,
       email: userFound.email,
       username: userFound.firstName,
     });
@@ -35,7 +35,7 @@ export const signIn = async (req, res) => {
     });
 
     res.json({
-      id: userFound._id,
+      id: userFound.collaboratorId,
       username: userFound.firstName,
       email: userFound.email,
     });
