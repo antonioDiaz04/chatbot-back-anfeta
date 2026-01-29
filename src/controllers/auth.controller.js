@@ -28,12 +28,15 @@ export const signIn = async (req, res) => {
     });
 
     res.cookie("token", token, {
-      httpOnly: process.env.NODE_ENV !== "development",
-      sameSite: "lax",    // NO "none" en http
-      secure: false,      // para que pueda secibir el http
-      path: "/"
+      // httpOnly: process.env.NODE_ENV !== "development",
+      // sameSite: "lax",    // NO "none" en http
+      // secure: false,      // para que pueda secibir el http
+      // path: "/"
       // secure: true, //para https
       // sameSite: "none",
+      httpOnly: true,
+      secure: true,        // SIEMPRE true en Render
+      sameSite: "none",    // frontend y backend separados
     });
 
     res.json({
@@ -65,7 +68,7 @@ export const verifyToken = (req, res) => {
 export const logout = async (req, res) => {
   res.cookie("token", "", {
     httpOnly: true,
-    // secure: true,
+    secure: true,
     expires: new Date(0),
   });
   return res.sendStatus(200);
