@@ -49,8 +49,6 @@ export async function getActividadesConRevisiones(req, res) {
     if (!Array.isArray(actividadesRaw) || actividadesRaw.length === 0) {
       const respuestaSinActividades = "No tienes actividades registradas para hoy";
 
-
-
       return res.json({
         success: true,
         answer: respuestaSinActividades,
@@ -209,6 +207,7 @@ export async function getActividadesConRevisiones(req, res) {
         // ]
       });
     }
+
 
     // 8️ Calcular métricas SOLO de actividades finales (con tiempo y en horario laboral)
     let totalTareasConTiempo = 0;
@@ -380,6 +379,54 @@ EJEMPLO DE RESPUESTA:
         ultimoIntento: null
       }))
     );
+    const promptNombreConversacion = `
+Genera un TÍTULO MUY CORTO para una conversación.
+
+ACTIVIDADES:
+${actividadesFinales.map(a => `- ${a.titulo}`).join('\n')}
+
+CONTEXTO:
+- Proyecto principal: "${proyectoPrincipal}"
+- Tareas con tiempo: ${totalTareasConTiempo}
+- Tareas alta prioridad: ${tareasAltaPrioridad}
+
+REGLAS OBLIGATORIAS:
+- MÁXIMO 2 PALABRAS
+- Solo letras y espacios
+- Sin emojis
+- Sin signos de puntuación
+- No frases completas
+- Idioma español
+- Usa la palabra más REPRESENTATIVA de las actividades
+- Si hay un proyecto claro, úsalo
+
+FORMATOS VÁLIDOS:
+- "<Tema>"
+- "<Tema> hoy"
+- "<Proyecto>"
+- "<Proyecto> tareas"
+
+EJEMPLOS CORRECTOS:
+- "ANFETA"
+- "Pendientes"
+- "Soporte hoy"
+- "Migración tareas"
+- "Backend urgente"
+
+RESPONDE SOLO EL TÍTULO
+`.trim();
+
+
+    let nombreConversacionIA = "Nueva conversación";
+
+    try {
+      const aiNombre = await smartAICall(promptNombreConversacion);
+      if (aiNombre?.text) {
+        nombreConversacionIA = aiNombre.text.trim().slice(0, 60);
+      }
+    } catch (e) {
+      console.warn("No se pudo generar nombre de conversación con IA");
+    }
 
     // Guardar historial con mensaje del usuario, respuesta del bot y tareas conocidas
     await HistorialBot.findOneAndUpdate(
@@ -387,7 +434,8 @@ EJEMPLO DE RESPUESTA:
       {
         $setOnInsert: {
           userId: odooUserId,
-          sessionId
+          sessionId,
+          nombreConversacion: nombreConversacionIA
         },
         $set: {
           tareasEstado: tareasEstadoArray,
@@ -499,308 +547,82 @@ EJEMPLO DE RESPUESTA:
   }
 }
 
-// Funciones originales (mantener compatibilidad)
-export async function devuelveActividades(req, res) {
+export async function obtenerActividadesConTiempoHoy(req, res) {
   try {
-    const { email } = sanitizeObject(req.body);
-
-
-    // Obtener el ID del usuario desde el token (viene del middleware de auth)
-    const { token } = req.cookies;
-    const decoded = jwt.verify(token, TOKEN_SECRET);
-    const sessionUserId = decoded.id;
-
-    const sessionId = generarSessionIdDiario(sessionUserId);
-
-
-    const response = await axios.get(
-      `${urlApi}/actividades/assignee/${email}/del-dia`
-    );
-
-    const actividadesRaw = response.data.data;
-
-    if (!Array.isArray(actividadesRaw)) {
-
-      return res.json([]);
-    }
-
-    // 1. Filtrar SOLO la actividad en horario 09:30-16:30
-    const actividadSeleccionada = actividadesRaw.find((a) => {
-      const inicio = horaAMinutos(a.horaInicio?.trim());
-      const fin = horaAMinutos(a.horaFin?.trim());
-
-      return inicio === horaAMinutos('09:30') && fin === horaAMinutos('16:30');
-    });
-
-    // 2. Si no hay actividad en ese horario, retornar array vacío
-    if (!actividadSeleccionada) {
-
-      // );
-      return res.json([]);
-    }
-
-    // 3. Extraer duracionMin de cada pendiente
-    const duracionesMin = actividadSeleccionada.pendientes && Array.isArray(actividadSeleccionada.pendientes)
-      ? actividadSeleccionada.pendientes.map(p => p.duracionMin || 0)
-      : [];
-
-    // 4. Crear objeto con la estructura requerida
-    const resultado = {
-      t: actividadSeleccionada.titulo ? actividadSeleccionada.titulo.slice(0, 60) : "Sin título",
-      h: `${actividadSeleccionada.horaInicio}-${actividadSeleccionada.horaFin}`,
-      p: actividadSeleccionada.pendientes ? actividadSeleccionada.pendientes.length : 0,
-      duraciones: duracionesMin
-    };
-
-    // 5. Filtrar según la regla (debe tener valor en "h")
-    const actividadesFiltradas = resultado.h != null && resultado.h !== ""
-      ? [resultado]
-      : [];
-
-    return res.json(actividadesFiltradas);
-
-  } catch (error) {
-    console.error("Error:", error);
-    return res.status(500).json({
-      success: false,
-      message: "Error interno"
-    });
-  }
-}
-
-export async function devuelveActReviciones(req, res) {
-  try {
-    const { email, idsAct, sessionId: reqSessionId } = sanitizeObject(req.body);
-
-    if (!email || !Array.isArray(idsAct)) {
-      return res.status(400).json({
-        success: false,
-        message: "Parámetros inválidos"
-      });
-    }
-
     const { token } = req.cookies;
     const decoded = jwt.verify(token, TOKEN_SECRET);
     const odooUserId = decoded.id;
 
+    const hoy = new Date().toISOString().split('T')[0];
 
-    const sessionId = generarSessionIdDiario(odooUserId);;
+    // Buscar actividades del usuario
+    const registroUsuario = await ActividadesSchema.findOne({ odooUserId }).lean();
 
-    const today = new Date();
-    const formattedToday = today.toISOString().split('T')[0];
-
-    const response = await axios.get(
-      `${urlApi}/reportes/revisiones-por-fecha?date=${formattedToday}&colaborador=${email}`
-    );
-
-    if (!response.data?.success) {
-      return res.status(500).json({
-        success: false,
-        message: "Error al obtener revisiones"
+    if (!registroUsuario || !registroUsuario.actividades) {
+      return res.json({
+        success: true,
+        data: [],
+        message: "No se encontraron actividades para hoy"
       });
     }
 
-    const revisiones = response.data.data;
-    const actividadesRevi = new Map();
-
-    revisiones.colaboradores.forEach(colaborador => {
-      (colaborador.items?.actividades ?? []).forEach(actividad => {
-        if (idsAct.length && !idsAct.includes(actividad.id)) return;
-
-        const pendientesFiltrados = (actividad.pendientes ?? [])
-          .filter(p => p.assignees?.some(a => a.name === email))
-          .map(p => ({
-            id: p.id,
-            nombre: p.nombre,
-            terminada: p.terminada,
-            confirmada: p.confirmada,
-            duracionMin: p.duracionMin,
-            fechaCreacion: p.fechaCreacion,
-            fechaFinTerminada: p.fechaFinTerminada,
-            prioridad: p.duracionMin > 60 ? "ALTA" :
-              p.duracionMin > 30 ? "MEDIA" :
-                p.duracionMin > 0 ? "BAJA" : "SIN TIEMPO"
-          }));
-
-        if (!pendientesFiltrados.length) return;
-
-        if (!actividadesRevi.has(actividad.id)) {
-          actividadesRevi.set(actividad.id, {
-            actividades: {
-              id: actividad.id,
-              titulo: actividad.titulo
-            },
-            pendientes: pendientesFiltrados,
-            assignees: pendientesFiltrados[0]?.assignees ?? [
-              { name: email }
-            ]
-          });
-        }
-      });
-    });
-
-    const resultado = Array.from(actividadesRevi.values());
-    const totalPendientes = resultado.reduce((sum, act) => sum + act.pendientes.length, 0);
-
-    return res.status(200).json({
-      success: true,
-      sessionId: sessionId,
-      data: resultado
-    });
-
-  } catch (error) {
-    if (isGeminiQuotaError(error)) {
-      return res.status(429).json({
-        success: false,
-        reason: "QUOTA_EXCEEDED",
-        message: "Intenta nuevamente en unos minutos."
-      });
-    }
-
-    return res.status(500).json({
-      success: false,
-      message: "Error interno"
-    });
-  }
-}
-
-export async function guardarExplicaciones(req, res) {
-  try {
-    const { explanations, sessionId } = sanitizeObject(req.body);
-    const { token } = req.cookies;
-
-    if (!Array.isArray(explanations)) {
-      return res.status(400).json({ error: "No se recibieron explicaciones válidas" });
-    }
-
-    const decoded = jwt.verify(token, TOKEN_SECRET);
-    const odooUserId = decoded.id;
-
-    // 1. Documento raíz del usuario
-    let registroUsuario = await ActividadesSchema.findOne({ odooUserId });
-
-    if (!registroUsuario) {
-      registroUsuario = await ActividadesSchema.create({
-        odooUserId,
-        actividades: []
-      });
-    }
-
-    // 2. Procesar explicaciones
-    for (const exp of explanations) {
-
-      // Buscar / crear actividad
-      let actividad = registroUsuario.actividades.find(
-        a => a.titulo === exp.activityTitle
-      );
-
-      if (!actividad) {
-        registroUsuario.actividades.push({
-          actividadId: `ACT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-          titulo: exp.activityTitle,
-          fecha: new Date().toISOString().split("T")[0],
-          pendientes: []
-        });
-
-        actividad = registroUsuario.actividades.at(-1);
-      }
-
-      // 3. Buscar pendiente (USANDO id)
-      const pendienteIndex = actividad.pendientes.findIndex(
-        (p) => p.pendienteId === exp.taskId
-      );
-
-      const datosPendiente = {
-        pendienteId: exp.taskId,
-        nombre: exp.taskName,
-
-        // 🔑 SOLO la última descripción válida
-        descripcion: exp.explanation,
-
-        terminada: !!exp.confirmed,
-        confirmada: !!exp.confirmed,
-
-        duracionMin: exp.duration || 0,
-
-        // 🔑 fecha de última actualización
-        updatedAt: new Date()
-      };
-
-
-      if (pendienteIndex !== -1) {
-        // ✅ EXISTE → SOLO ACTUALIZA
-        actividad.pendientes[pendienteIndex].descripcion = exp.explanation;
-        actividad.pendientes[pendienteIndex].terminada = !!exp.confirmed;
-        actividad.pendientes[pendienteIndex].confirmada = !!exp.confirmed;
-        actividad.pendientes[pendienteIndex].duracionMin = exp.duration || 0;
-        actividad.pendientes[pendienteIndex].updatedAt = new Date();
-      } else {
-        // ❌ NO EXISTE → SE CREA UNA SOLA VEZ
-        actividad.pendientes.push({
-          ...datosPendiente,
-          createdAt: new Date()
-        });
-      }
-
-    }
-
-    registroUsuario.ultimaSincronizacion = new Date();
-    await registroUsuario.save();
-
-    // 4. Historial del bot
-    const historial = await HistorialBot.findOne({ sessionId });
-
-    if (historial) {
-      explanations.forEach(exp => {
-        const estadoIndex = historial.tareasEstado.findIndex(
-          t => t.taskId === exp.taskId
+    // Filtrar actividades de hoy con pendientes que tienen tiempo
+    const actividadesDeHoy = registroUsuario.actividades
+      .filter(actividad => actividad.fecha === hoy)
+      .map(actividad => {
+        // Solo pendientes con tiempo y no terminados
+        const pendientesConTiempo = actividad.pendientes.filter(p =>
+          p.duracionMin && p.duracionMin > 0 && !p.terminada
         );
 
-        const nuevoEstado = {
-          taskId: exp.taskId,
-          taskName: exp.taskName,
-          actividadTitulo: exp.activityTitle,
-          explicada: true,
-          validada: exp.confirmed || false,
-          explicacion: exp.explanation, // ✅ TAMBIÉN AQUÍ
-          ultimoIntento: new Date()
+        if (pendientesConTiempo.length === 0) return null;
+
+        return {
+          actividadId: actividad.actividadId,
+          titulo: actividad.titulo,
+          tituloProyecto: actividad.tituloProyecto,
+          horaInicio: actividad.horaInicio,
+          horaFin: actividad.horaFin,
+          status: actividad.status,
+          pendientes: pendientesConTiempo.map(p => ({
+            pendienteId: p.pendienteId,
+            nombre: p.nombre,
+            descripcion: p.descripcion,
+            duracionMin: p.duracionMin,
+            terminada: false,
+            motivoNoCompletado: null // Para llenar después
+          }))
         };
+      })
+      .filter(act => act !== null)
+      .sort((a, b) => horaAMinutos(a.horaInicio) - horaAMinutos(b.horaInicio));
 
-        if (estadoIndex !== -1) {
-          historial.tareasEstado.set(estadoIndex, nuevoEstado);
-        } else {
-          historial.tareasEstado.push(nuevoEstado);
-        }
+    if (actividadesDeHoy.length === 0) {
+      return res.json({
+        success: true,
+        data: [],
+        message: "No tienes tareas pendientes con tiempo para hoy"
       });
-
-      historial.mensajes.push({
-        role: "bot",
-        contenido: `He guardado las descripciones de ${explanations.length} tareas correctamente.`,
-        tipoMensaje: "sistema",
-        timestamp: new Date()
-      });
-
-      historial.estadoConversacion = "finalizado";
-      await historial.save();
     }
 
-    return res.status(200).json({
+    return res.json({
       success: true,
-      message: "Explicaciones guardadas con éxito",
-      total: explanations.length,
-      sessionId
+      data: actividadesDeHoy,
+      totalActividades: actividadesDeHoy.length,
+      totalTareas: actividadesDeHoy.reduce((sum, act) => sum + act.pendientes.length, 0)
     });
 
   } catch (error) {
-    console.error("Error en guardarExplicaciones:", error);
+    console.error("Error en obtenerActividadesConTiempoHoy:", error);
     return res.status(500).json({
       success: false,
+      message: "Error al obtener actividades",
       error: error.message
     });
   }
 }
 
-export async function confirmarEstadoPendientes(req, res) {
+export async function actualizarEstadoPendientes(req, res) {
   try {
     const { actividadesId, IdPendientes, estado, motivoNoCompletado } = sanitizeObject(req.body);
 
@@ -939,34 +761,232 @@ RESPONDE ÚNICAMENTE EN JSON CON ESTE FORMATO EXACTO:
     });
   }
 }
+export async function guardarExplicaciones(req, res) {
+  try {
+    const { explanations, sessionId } = sanitizeObject(req.body);
+    const { token } = req.cookies;
 
-// export async function guardarPendientes (req, res) {
+    if (!Array.isArray(explanations)) {
+      return res.status(400).json({ error: "No se recibieron explicaciones válidas" });
+    }
 
-// }
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const odooUserId = decoded.id;
+
+    console.log(explanations);
+
+    // 1. Documento raíz del usuario
+    let registroUsuario = await ActividadesSchema.findOne({ odooUserId });
+
+    if (!registroUsuario) {
+      registroUsuario = await ActividadesSchema.create({
+        odooUserId,
+        actividades: []
+      });
+    }
+
+    // 2. Procesar explicaciones
+    for (const exp of explanations) {
+
+      // Buscar / crear actividad
+      let actividad = registroUsuario.actividades.find(
+        a => a.titulo === exp.activityTitle
+      );
+
+      if (!actividad) {
+        registroUsuario.actividades.push({
+          actividadId: `ACT-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+          titulo: exp.activityTitle,
+          fecha: new Date().toISOString().split("T")[0],
+          pendientes: []
+        });
+
+        actividad = registroUsuario.actividades.at(-1);
+      }
+
+      // 3. Buscar pendiente (USANDO id)
+      const pendienteIndex = actividad.pendientes.findIndex(
+        (p) => p.pendienteId === exp.taskId
+      );
+
+      const datosPendiente = {
+        pendienteId: exp.taskId,
+        nombre: exp.taskName,
+        descripcion: exp.explanation,
+        terminada: !!exp.confirmed,
+        confirmada: !!exp.confirmed,
+        duracionMin: exp.duration || 0,
+        updatedAt: new Date()
+      };
+
+
+      if (pendienteIndex !== -1) {
+        actividad.pendientes[pendienteIndex].descripcion = exp.explanation;
+        actividad.pendientes[pendienteIndex].terminada = !!exp.confirmed;
+        actividad.pendientes[pendienteIndex].confirmada = !!exp.confirmed;
+        actividad.pendientes[pendienteIndex].duracionMin = exp.duration || 0;
+        actividad.pendientes[pendienteIndex].updatedAt = new Date();
+      } else {
+        actividad.pendientes.push({
+          ...datosPendiente,
+          createdAt: new Date()
+        });
+      }
+
+    }
+
+    registroUsuario.ultimaSincronizacion = new Date();
+    await registroUsuario.save();
+
+    // 4. Historial del bot
+    const historial = await HistorialBot.findOne({ sessionId });
+
+    if (historial) {
+      explanations.forEach(exp => {
+        const estadoIndex = historial.tareasEstado.findIndex(
+          t => t.taskId === exp.taskId
+        );
+
+        const nuevoEstado = {
+          taskId: exp.taskId,
+          taskName: exp.taskName,
+          actividadTitulo: exp.activityTitle,
+          explicada: true,
+          validada: exp.confirmed || false,
+          explicacion: exp.explanation,
+          ultimoIntento: new Date()
+        };
+
+        if (estadoIndex !== -1) {
+          historial.tareasEstado.set(estadoIndex, nuevoEstado);
+        } else {
+          historial.tareasEstado.push(nuevoEstado);
+        }
+      });
+
+      historial.mensajes.push({
+        role: "bot",
+        contenido: `He guardado las descripciones de ${explanations.length} tareas correctamente.`,
+        tipoMensaje: "sistema",
+        timestamp: new Date()
+      });
+
+      historial.estadoConversacion = "finalizado";
+      await historial.save();
+    }
+
+    return res.status(200).json({
+      success: true,
+      message: "Explicaciones guardadas con éxito",
+      total: explanations.length,
+      sessionId
+    });
+
+  } catch (error) {
+    console.error("Error en guardarExplicaciones:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+}
+
+
+export async function confirmarEstadoPendientes(req, res) {
+  try {
+    const { pendienteId, actividadId, transcript } = sanitizeObject(req.body);
+
+    if (!actividadId || !pendienteId || !transcript) {
+      return res.status(400).json({
+        success: false,
+        message: "actividadId, pendienteId y transcript son requeridos",
+        recibido: { actividadId, pendienteId, transcript }
+      });
+    }
+
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const odooUserId = decoded.id;
+
+    // 3. Buscar el contexto para la IA (Plan de la mañana)
+    const registro = await ActividadesSchema.findOne(
+      { odooUserId, "actividades.actividadId": actividadId },
+      { "actividades.$": 1 }
+    );
+
+    if (!registro) {
+      return res.status(404).json({ success: false, message: "Actividad no encontrada" });
+    }
+
+    const pendienteOriginal = registro.actividades[0].pendientes.find(p => p.pendienteId === pendienteId);
+
+    // 4. Llamada Inteligente a la IA
+    const prompt = `
+      Analiza si el reporte de voz confirma la realización de la tarea.
+      TAREA: "${pendienteOriginal.nombre}"
+      REPORTE: "${transcript}"
+      Responde SOLO JSON: {"esValido": boolean, "razon": "por qué no", "mensaje": "feedback"}
+    `;
+
+    const aiResponse = await smartAICall(prompt);
+    const validacion = JSON.parse(aiResponse.text.match(/\{.*\}/s)[0]);
+
+    // 5. Actualizar MongoDB (Usando el esquema Actividades que mostraste al inicio)
+    const resultado = await ActividadesSchema.updateOne(
+      { odooUserId, "actividades.actividadId": actividadId },
+      {
+        $set: {
+          // 'terminada' y 'confirmada' según tu esquema
+          "actividades.$.pendientes.$[pen].terminada": validacion.esValido,
+          "actividades.$.pendientes.$[pen].confirmada": true,
+          "actividades.$.pendientes.$[pen].motivoNoCompletado": validacion.esValido ? "" : validacion.razon,
+          "actividades.$.pendientes.$[pen].fechaFinTerminada": validacion.esValido ? new Date() : null
+        }
+      },
+      {
+        arrayFilters: [{ "pen.pendienteId": pendienteId }]
+      }
+    );
+
+    return res.json({
+      success: true,
+      terminada: validacion.esValido,
+      mensaje: validacion.mensaje,
+      provider: aiResponse.provider
+    });
+
+  } catch (error) {
+    console.error("Error en confirmarEstadoPendientes:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error interno al validar con IA",
+      error: error.message
+    });
+  }
+}
 
 export async function obtenerHistorialSesion(req, res) {
   try {
     const { token } = req.cookies;
+    let { sessionId } = req.params;
+
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const userId = decoded.id;
+
+    if (!sessionId) {
+      sessionId = generarSessionIdDiario(userId);
+    }
 
     if (!token) {
       return res.status(401).json({ success: false, message: "No autenticado" });
     }
 
-    const decoded = jwt.verify(token, TOKEN_SECRET);
-    const userId = decoded.id; // Este es el OdooUserId de 32 caracteres
-
-    const sessionId = generarSessionIdDiario(userId);// Genera un sessionId diario
-
-    // 1️⃣ Obtener historial de la conversación (HistorialBot)
     const historial = await HistorialBot.findOne({ userId, sessionId }).lean();
 
-    // 2️⃣ Obtener actividades del usuario (ActividadesSchema)
-    // Aquí es donde está la información que guardamos con 'guardarExplicaciones'
     const actividadesCache = await ActividadesSchema.findOne({
       odooUserId: userId
     }).lean();
 
-    // 3️⃣ Procesar datos de actividades (incluyendo la nueva descripción)
     const actividadesProcesadas = actividadesCache ? {
       odooUserId: actividadesCache.odooUserId,
       ultimaSincronizacion: actividadesCache.ultimaSincronizacion,
@@ -976,11 +996,10 @@ export async function obtenerHistorialSesion(req, res) {
         tituloProyecto: act.tituloProyecto,
         status: act.status,
         fecha: act.fecha,
-        // Mapeamos los pendientes incluyendo la descripción (la explicación de voz)
         pendientes: (act.pendientes || []).map(p => ({
           pendienteId: p.pendienteId,
           nombre: p.nombre,
-          descripcion: p.descripcion || "", // <--- IMPORTANTE: Recuperamos la explicación
+          descripcion: p.descripcion || "",
           terminada: p.terminada,
           confirmada: p.confirmada,
           duracionMin: p.duracionMin,
@@ -990,7 +1009,6 @@ export async function obtenerHistorialSesion(req, res) {
       }))
     } : null;
 
-    // 4️⃣ Si no hay historial de chat pero sí hay actividades, devolvemos las actividades
     if (!historial) {
       return res.json({
         success: true,
@@ -1003,12 +1021,10 @@ export async function obtenerHistorialSesion(req, res) {
       });
     }
 
-    // 5️⃣ Retornar respuesta unificada
     return res.json({
       success: true,
       data: {
         ...historial,
-        // Aseguramos que el 'ultimoAnalisis' también refleje los cambios si es necesario
         ultimoAnalisis: historial.ultimoAnalisis
       },
       actividades: actividadesProcesadas,
@@ -1044,46 +1060,46 @@ export async function obtenerTodoHistorialSesion(req, res) {
     const decoded = jwt.verify(token, TOKEN_SECRET);
     const userId = decoded.id;
 
-    // 1️⃣ Buscar todos los historiales asociados al usuario
-    // Ordenamos por fecha de creación (más reciente primero)
-    const historiales = await HistorialBot.find({ userId })
-      .sort({ updatedAt: -1 }) // O 'createdAt', dependiendo de tu esquema
+    const hoy = new Date();
+    const unaSemanaAtras = new Date(hoy.setDate(hoy.getDate() - 7));
+    unaSemanaAtras.setHours(0, 0, 0, 0);
+    const historialesSemana = await HistorialBot.find({
+      userId,
+      createdAt: { $gte: unaSemanaAtras }
+    })
+      .sort({ createdAt: -1 })
       .lean();
 
-    // 2️⃣ Obtener también el caché de actividades (opcional, pero útil para contexto)
     const actividadesCache = await ActividadesSchema.findOne({
       odooUserId: userId
     }).lean();
 
-    // 3️⃣ Validar si existen registros
-    if (!historiales || historiales.length === 0) {
-      return res.json({
-        success: true,
-        message: "No se encontraron sesiones previas",
-        data: [],
-        cache: {
-          disponible: !!actividadesCache
-        }
-      });
-    }
+    const todasLasTareasValidadas = historialesSemana.reduce((acc, historial) => {
+      if (historial.tareasEstado && Array.isArray(historial.tareasEstado)) {
+        return [...acc, ...historial.tareasEstado];
+      }
+      return acc;
+    }, []);
 
-    // 4️⃣ Retornar el listado completo
     return res.json({
       success: true,
-      count: historiales.length,
-      data: historiales,
+      data: historialesSemana[0] || {},
+      historialSemanal: historialesSemana,
+      actividades: actividadesCache?.actividades || [],
+      tareasEstado: todasLasTareasValidadas,
       cache: {
         disponible: !!actividadesCache,
         ultimaSincronizacion: actividadesCache?.ultimaSincronizacion || null
       },
       meta: {
-        userId,
+        rango: "7 días",
+        totalSesiones: historialesSemana.length,
         timestamp: new Date().toISOString()
       }
     });
 
   } catch (error) {
-    console.error("❌ Error al obtener todo el historial de sesiones:", error);
+    console.error("❌ Error al obtener el historial semanal:", error);
     return res.status(500).json({
       success: false,
       message: "Error interno del servidor",
@@ -1091,3 +1107,43 @@ export async function obtenerTodoHistorialSesion(req, res) {
     });
   }
 }
+
+export async function obtenerHistorialSidebar(req, res) {
+  try {
+    const { token } = req.cookies;
+    if (!token) {
+      return res.status(401).json({ success: false, message: "Token requerido" });
+    }
+
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const userId = decoded.id;
+
+    const historial = await HistorialBot.find({ userId })
+      .select("sessionId nombreConversacion userId estadoConversacion createdAt updatedAt")
+      .sort({
+        estadoConversacion: 1,
+        updatedAt: -1
+      })
+      .lean();
+
+    const data = historial.map((conv) => ({
+      sessionId: conv.sessionId,
+      nombreConversacion: conv.nombreConversacion?.trim() || `Chat ${new Date(conv.createdAt).toLocaleDateString()}`,
+      userId: conv.userId,
+      estadoConversacion: conv.estadoConversacion,
+      createdAt: conv.createdAt.toISOString(),
+      updatedAt: conv.updatedAt?.toISOString() || conv.createdAt.toISOString(),
+    }));
+
+    res.json({ success: true, data });
+
+  } catch (error) {
+    console.error("Error al obtener historial sidebar:", error);
+    res.status(500).json({
+      success: false,
+      message: "Error interno del servidor"
+    });
+  }
+}
+
+

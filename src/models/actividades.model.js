@@ -10,6 +10,7 @@ const pendienteSchema = new mongoose.Schema(
     duracionMin: { type: Number, default: 0 },
     fechaCreacion: Date,
     fechaFinTerminada: Date,
+    motivoNoCompletado: String, 
   },
   { _id: false }
 );

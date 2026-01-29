@@ -2,12 +2,9 @@ import { Router } from "express";
 
 const router = Router();
 import {
-  devuelveActividades,
   getActividadesConRevisiones,
-  devuelveActReviciones,
-  // guardarPendientes,
   confirmarEstadoPendientes,
-  validarExplicacion
+  actualizarEstadoPendientes
 } from '../controllers/assistant.controller.js';
 
 import {
@@ -15,23 +12,27 @@ import {
   obtenerHistorialSesion,
   obtenerTodoHistorialSesion,
   // eliminarHistorialSesion,
-  guardarExplicaciones
+  obtenerHistorialSidebar,
+  guardarExplicaciones,
+  validarExplicacion,
+  obtenerActividadesConTiempoHoy
 } from '../controllers/assistant.controller.js';
 
 
 // Rutas de historial
-router.get('/historial/sesion', obtenerHistorialSesion);
+router.get('/historial/sesion/:sessionId', obtenerHistorialSesion);
 router.get('/historial/usuario', obtenerTodoHistorialSesion);
+router.get('/historial/titulos', obtenerHistorialSidebar);
+
 
 // Rutas de actividades/pendientes
-router.post('/actividades', devuelveActividades);
+router.get('/actividades/hoy/con-tiempo', obtenerActividadesConTiempoHoy);
+router.put('/actividades/pendientes/actualizar', actualizarEstadoPendientes);
 router.post('/validar-explicacion', validarExplicacion);
 router.post('/guardar-explicaciones', guardarExplicaciones);
 router.post('/actividades-con-revisiones', getActividadesConRevisiones);
-// router.post('/actividades-local', getActividadesLocal);
-router.post('/revisiones', devuelveActReviciones);
-// router.post('/guardarPendientes', guardarPendientes);
 router.post('/confirmarEstadoPendientes', confirmarEstadoPendientes);
+
 
 // Rutas de historial
 // router.delete('/historial/sesion', eliminarHistorialSesion);

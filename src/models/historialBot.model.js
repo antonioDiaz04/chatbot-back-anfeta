@@ -133,6 +133,10 @@ const HistorialSchema = new mongoose.Schema(
             type: String,
             required: true
         },
+        nombreConversacion: {
+            type: String,
+            default: "Nueva conversación"
+        },
         tareasEstado: {
             type: [EstadoTareaSchema],
             default: []
@@ -168,5 +172,6 @@ const HistorialSchema = new mongoose.Schema(
 );
 
 HistorialSchema.index({ userId: 1, sessionId: 1 }, { unique: true });
+HistorialSchema.index({ userId: 1, createdAt: -1 });
 
 export default mongoose.model("HistorialBot", HistorialSchema);
