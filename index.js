@@ -9,6 +9,7 @@ import { CORS_ORIGINS, API_VERSION, PORT } from "./src/config.js";
 import { connectDB } from "./src/database/db.js";
 
 // Importar rutas
+import adminRouter from "./src/routes/admin.routes.js";
 import assistantRoutes from "./src/routes/assistant.routes.js";
 import authRoutes from "./src/routes/auth.routes.js";
 import reportesRoutes from "./src/routes/reportes.routes.js";
@@ -60,6 +61,7 @@ app.use((req, res, next) => {
 
 // Rutas
 app.use(`/api/${API_VERSION}/assistant`, assistantRoutes);
+app.use(`/api/${API_VERSION}/admin`, adminRouter);
 app.use(`/api/${API_VERSION}/auth`, authRoutes);
 app.use(`/api/${API_VERSION}/reportes`, reportesRoutes);
 

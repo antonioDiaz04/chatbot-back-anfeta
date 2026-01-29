@@ -15,13 +15,16 @@ import {
   obtenerHistorialSesion,
   obtenerTodoHistorialSesion,
   // eliminarHistorialSesion,
-  guardarExplicaciones
+  guardarExplicaciones,
+  obtenerTodasExplicacionesAdmin
 } from '../controllers/assistant.controller.js';
 
 
 // Rutas de historial
 router.get('/historial/sesion', obtenerHistorialSesion);
 router.get('/historial/usuario', obtenerTodoHistorialSesion);
+// funcion para obtener todo los reportes de obtenerExplicacionesUsuario
+router.get('/admin/todas-explicaciones', obtenerTodasExplicacionesAdmin);
 
 // Rutas de actividades/pendientes
 router.post('/actividades', devuelveActividades);

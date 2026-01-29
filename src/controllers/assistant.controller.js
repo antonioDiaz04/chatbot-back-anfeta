@@ -668,6 +668,7 @@ export async function guardarExplicaciones(req, res) {
   try {
     const { explanations, sessionId } = sanitizeObject(req.body);
     const { token } = req.cookies;
+    console.log("Guardar explicaciones:", req.body);
 
     if (!Array.isArray(explanations)) {
       return res.status(400).json({ error: "No se recibieron explicaciones válidas" });
@@ -784,6 +785,9 @@ export async function guardarExplicaciones(req, res) {
       await historial.save();
     }
 
+    // funcion que envia notificacion de explicaciones guardadas de colaboradores
+    //  await enviarNotificacionExplicacionesGuardadas(odooUserId, explanations.length);
+
     return res.status(200).json({
       success: true,
       message: "Explicaciones guardadas con éxito",
@@ -799,6 +803,60 @@ export async function guardarExplicaciones(req, res) {
     });
   }
 }
+// 
+// nueva funcio
+export const obtenerExplicacionesUsuario = async (req, res) => {
+  try {
+    const { odooUserId } = req.params; // O desde el token
+    
+    const registroUsuario = await ActividadesSchema.findOne({ odooUserId });
+    
+    if (!registroUsuario) {
+      return res.status(404).json({
+        success: false,
+        message: "Usuario no encontrado",
+        data: []
+      });
+    }
+    
+    // Extraer todas las explicaciones en formato plano
+    const todasExplicaciones = registroUsuario.actividades.reduce((acc, actividad) => {
+      actividad.pendientes.forEach(pendiente => {
+        if (pendiente.descripcion) { // Solo si tiene explicación
+          acc.push({
+            actividadId: actividad.actividadId,
+            actividadTitulo: actividad.titulo,
+            actividadFecha: actividad.fecha,
+            pendienteId: pendiente.pendienteId,
+            nombreTarea: pendiente.nombre,
+            explicacion: pendiente.descripcion,
+            terminada: pendiente.terminada,
+            confirmada: pendiente.confirmada,
+            duracionMin: pendiente.duracionMin,
+            createdAt: pendiente.createdAt,
+            updatedAt: pendiente.updatedAt,
+            ultimaSincronizacion: registroUsuario.ultimaSincronizacion
+          });
+        }
+      });
+      return acc;
+    }, []);
+    
+    return res.status(200).json({
+      success: true,
+      total: todasExplicaciones.length,
+      data: todasExplicaciones,
+      ultimaSincronizacion: registroUsuario.ultimaSincronizacion
+    });
+    
+  } catch (error) {
+    console.error("Error al obtener explicaciones:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+};
 
 export async function confirmarEstadoPendientes(req, res) {
   try {
@@ -1084,6 +1142,89 @@ export async function obtenerTodoHistorialSesion(req, res) {
 
   } catch (error) {
     console.error("❌ Error al obtener todo el historial de sesiones:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error interno del servidor",
+      error: error.message
+    });
+  }
+}
+export async function obtenerTodasExplicacionesAdmin(req, res) {
+  try {
+    // const { token } = req.cookies;
+    // if (!token) {
+    //   return res.status(401).json({ success: false, message: "No autenticado" });
+    // }
+
+    // const decoded = jwt.verify(token, TOKEN_SECRET);
+    // const userId = decoded.id;
+    
+    // Verificar si es admin (podrías tener un campo 'rol' en el token)
+    // Por ahora, asumimos que todos pueden ver TODO
+    
+    // 1. Obtener TODOS los usuarios de ActividadesSchema
+    const todosUsuarios = await ActividadesSchema.find({})
+      .sort({ updatedAt: -1 })
+      .lean();
+    
+    // 2. Enriquecer con info de usuario si tienes Users collection
+    const usuariosEnriquecidos = await Promise.all(
+      todosUsuarios.map(async (usuarioDoc) => {
+        try {
+          // Si tienes una colección de usuarios, busca info adicional
+          const userInfo = await UserModel.findOne({ _id: usuarioDoc.odooUserId }).lean();
+          
+          return {
+            ...usuarioDoc,
+            userInfo: userInfo || null,
+            email: userInfo?.email || "No disponible",
+            nombre: userInfo?.nombre || userInfo?.username || "Usuario",
+            avatar: userInfo?.avatar,
+            rol: userInfo?.rol || "user"
+          };
+        } catch (err) {
+          console.warn(`Error enriqueciendo usuario ${usuarioDoc.odooUserId}:`, err);
+          return {
+            ...usuarioDoc,
+            userInfo: null,
+            email: "Error al cargar",
+            nombre: `Usuario ${usuarioDoc.odooUserId.substring(0, 8)}`,
+            rol: "user"
+          };
+        }
+      })
+    );
+
+    // 3. Calcular estadísticas generales
+    const estadisticas = {
+      totalUsuarios: todosUsuarios.length,
+      totalActividades: todosUsuarios.reduce((sum, u) => sum + (u.actividades?.length || 0), 0),
+      totalTareas: todosUsuarios.reduce((sum, u) => 
+        sum + (u.actividades?.reduce((sumAct, act) => sumAct + (act.pendientes?.length || 0), 0) || 0), 0),
+      totalTareasTerminadas: todosUsuarios.reduce((sum, u) => 
+        sum + (u.actividades?.reduce((sumAct, act) => 
+          sumAct + (act.pendientes?.filter(p => p.terminada)?.length || 0), 0) || 0), 0),
+      tiempoTotalMinutos: todosUsuarios.reduce((sum, u) => 
+        sum + (u.actividades?.reduce((sumAct, act) => 
+          sumAct + (act.pendientes?.reduce((sumP, p) => sumP + (p.duracionMin || 0), 0) || 0), 0) || 0), 0),
+    };
+
+    // 4. Devolver respuesta estructurada
+    return res.json({
+      success: true,
+      data: {
+        usuarios: usuariosEnriquecidos,
+        estadisticas,
+        metadata: {
+          fecha: new Date().toISOString(),
+          totalRegistros: todosUsuarios.length,
+          usuarioSolicitante: userId
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error("❌ Error en obtenerTodasExplicacionesAdmin:", error);
     return res.status(500).json({
       success: false,
       message: "Error interno del servidor",
