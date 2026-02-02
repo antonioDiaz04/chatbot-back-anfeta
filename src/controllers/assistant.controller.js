@@ -10,7 +10,7 @@ import ActividadesSchema from "../models/actividades.model.js";
 import HistorialBot from "../models/historialBot.model.js";
 import { TOKEN_SECRET } from '../config.js';
 
-const urlApi = 'https://wlserver-production.up.railway.app/api';
+const urlApi = 'https://wlserver-production-6735.up.railway.app';
 
 export async function getActividadesConRevisiones(req, res) {
   try {
