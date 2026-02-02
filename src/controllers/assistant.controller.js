@@ -3,14 +3,14 @@ import { getAllUsers } from './users.controller.js';
 import jwt from 'jsonwebtoken';
 import { isGeminiQuotaError } from '../libs/geminiRetry.js'
 import { sanitizeObject } from '../libs/sanitize.js'
-import { smartAICall } from '../libs/aiService.js';
+import { parseAIJSONSafe, smartAICall } from '../libs/aiService.js';
 import { generarSessionIdDiario } from '../libs/generarSessionIdDiario.js';
 import { horaAMinutos } from '../libs/horaAMinutos.js';
 import ActividadesSchema from "../models/actividades.model.js";
 import HistorialBot from "../models/historialBot.model.js";
-import { TOKEN_SECRET } from '../config.js';
+import { TOKEN_SECRET, API_URL_ANFETA } from '../config.js';
 
-const urlApi = 'https://wlserver-production-6735.up.railway.app';
+
 
 export async function getActividadesConRevisiones(req, res) {
   try {
@@ -41,7 +41,7 @@ export async function getActividadesConRevisiones(req, res) {
 
     // 1️ Obtener actividades del día para el usuario
     const actividadesResponse = await axios.get(
-      `${urlApi}/actividades/assignee/${email}/del-dia`
+      `${API_URL_ANFETA}/actividades/assignee/${email}/del-dia`
     );
 
     const actividadesRaw = actividadesResponse.data.data;
@@ -66,7 +66,7 @@ export async function getActividadesConRevisiones(req, res) {
     let todasRevisiones = { colaboradores: [] };
     try {
       const revisionesResponse = await axios.get(
-        `${urlApi}/reportes/revisiones-por-fecha`,
+        `${API_URL_ANFETA}/reportes/revisiones-por-fecha`,
         {
           params: {
             date: formattedToday,
@@ -566,61 +566,125 @@ export async function obtenerActividadesConTiempoHoy(req, res) {
       });
     }
 
-    // Filtrar actividades de hoy con pendientes que tienen tiempo
-    const actividadesDeHoy = registroUsuario.actividades
-      .filter(actividad => actividad.fecha === hoy)
-      .map(actividad => {
-        // Solo pendientes con tiempo y no terminados
-        const pendientesConTiempo = actividad.pendientes.filter(p =>
-          p.duracionMin && p.duracionMin > 0 && !p.terminada
-        );
+    const revisiones = response.data.data;
+    const actividadesRevi = new Map();
 
-        if (pendientesConTiempo.length === 0) return null;
+    revisiones.colaboradores.forEach(colaborador => {
+      (colaborador.items?.actividades ?? []).forEach(actividad => {
+        if (idsAct.length && !idsAct.includes(actividad.id)) return;
 
-        return {
-          actividadId: actividad.actividadId,
-          titulo: actividad.titulo,
-          tituloProyecto: actividad.tituloProyecto,
-          horaInicio: actividad.horaInicio,
-          horaFin: actividad.horaFin,
-          status: actividad.status,
-          pendientes: pendientesConTiempo.map(p => ({
-            pendienteId: p.pendienteId,
+        const pendientesFiltrados = (actividad.pendientes ?? [])
+          .filter(p => p.assignees?.some(a => a.name === email))
+          .map(p => ({
+            id: p.id,
             nombre: p.nombre,
-            descripcion: p.descripcion,
+            terminada: p.terminada,
+            confirmada: p.confirmada,
             duracionMin: p.duracionMin,
-            terminada: false,
-            motivoNoCompletado: null // Para llenar después
-          }))
-        };
-      })
-      .filter(act => act !== null)
-      .sort((a, b) => horaAMinutos(a.horaInicio) - horaAMinutos(b.horaInicio));
+            fechaCreacion: p.fechaCreacion,
+            fechaFinTerminada: p.fechaFinTerminada,
+            prioridad: p.duracionMin > 60 ? "ALTA" :
+              p.duracionMin > 30 ? "MEDIA" :
+                p.duracionMin > 0 ? "BAJA" : "SIN TIEMPO"
+          }));
 
-    if (actividadesDeHoy.length === 0) {
-      return res.json({
-        success: true,
-        data: [],
-        message: "No tienes tareas pendientes con tiempo para hoy"
+        if (!pendientesFiltrados.length) return;
+
+        if (!actividadesRevi.has(actividad.id)) {
+          actividadesRevi.set(actividad.id, {
+            actividades: {
+              id: actividad.id,
+              titulo: actividad.titulo
+            },
+            pendientes: pendientesFiltrados,
+            assignees: pendientesFiltrados[0]?.assignees ?? [
+              { name: email }
+            ]
+          });
+        }
       });
-    }
+    });
 
-    return res.json({
+    const resultado = Array.from(actividadesRevi.values());
+    const totalPendientes = resultado.reduce((sum, act) => sum + act.pendientes.length, 0);
+
+    return res.status(200).json({
       success: true,
-      data: actividadesDeHoy,
-      totalActividades: actividadesDeHoy.length,
-      totalTareas: actividadesDeHoy.reduce((sum, act) => sum + act.pendientes.length, 0)
+      sessionId: sessionId,
+      data: resultado
     });
 
   } catch (error) {
-    console.error("Error en obtenerActividadesConTiempoHoy:", error);
+    if (isGeminiQuotaError(error)) {
+      return res.status(429).json({
+        success: false,
+        reason: "QUOTA_EXCEEDED",
+        message: "Intenta nuevamente en unos minutos."
+      });
+    }
+
     return res.status(500).json({
       success: false,
-      message: "Error al obtener actividades",
-      error: error.message
+      message: "Error interno"
     });
   }
 }
+
+
+// 
+// nueva funcio
+export const obtenerExplicacionesUsuario = async (req, res) => {
+  try {
+    const { odooUserId } = req.params; // O desde el token
+    
+    const registroUsuario = await ActividadesSchema.findOne({ odooUserId });
+    
+    if (!registroUsuario) {
+      return res.status(404).json({
+        success: false,
+        message: "Usuario no encontrado",
+        data: []
+      });
+    }
+    
+    // Extraer todas las explicaciones en formato plano
+    const todasExplicaciones = registroUsuario.actividades.reduce((acc, actividad) => {
+      actividad.pendientes.forEach(pendiente => {
+        if (pendiente.descripcion) { // Solo si tiene explicación
+          acc.push({
+            actividadId: actividad.actividadId,
+            actividadTitulo: actividad.titulo,
+            actividadFecha: actividad.fecha,
+            pendienteId: pendiente.pendienteId,
+            nombreTarea: pendiente.nombre,
+            explicacion: pendiente.descripcion,
+            terminada: pendiente.terminada,
+            confirmada: pendiente.confirmada,
+            duracionMin: pendiente.duracionMin,
+            createdAt: pendiente.createdAt,
+            updatedAt: pendiente.updatedAt,
+            ultimaSincronizacion: registroUsuario.ultimaSincronizacion
+          });
+        }
+      });
+      return acc;
+    }, []);
+    
+    return res.status(200).json({
+      success: true,
+      total: todasExplicaciones.length,
+      data: todasExplicaciones,
+      ultimaSincronizacion: registroUsuario.ultimaSincronizacion
+    });
+    
+  } catch (error) {
+    console.error("Error al obtener explicaciones:", error);
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+};
 
 export async function actualizarEstadoPendientes(req, res) {
   try {
@@ -675,7 +739,6 @@ export async function actualizarEstadoPendientes(req, res) {
 export async function validarExplicacion(req, res) {
   try {
     const { taskName, explanation, activityTitle } = sanitizeObject(req.body);
-    const cleanTitle = activityTitle.replace(/,/g, ' ');
 
     const { token } = req.cookies;
 
@@ -689,7 +752,7 @@ está realmente relacionado con una tarea específica
 o con algo necesario para poder avanzar en ella HOY.
 
 CONTEXTO:
-- Actividad: "${cleanTitle}"
+- Actividad: "${activityTitle}"
 - Tarea: "${taskName}"
 - Comentario del usuario: "${explanation}"
 
@@ -720,19 +783,12 @@ RESPONDE ÚNICAMENTE EN JSON CON ESTE FORMATO EXACTO:
 `;
 
     const aiResult = await smartAICall(prompt);
-    const text = aiResult?.text;
+    const resultadoIA = aiResult?.text;
 
-    if (!text) {
+    if (!resultadoIA) {
       return res.status(500).json({ valida: false, razon: "La IA no respondió." });
     }
 
-    // Extracción robusta del JSON
-    const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      return res.status(500).json({ valida: false, razon: "Formato de IA inválido." });
-    }
-
-    const resultadoIA = JSON.parse(jsonMatch[0]);
 
     console.log(resultadoIA);
 
@@ -761,6 +817,153 @@ RESPONDE ÚNICAMENTE EN JSON CON ESTE FORMATO EXACTO:
     });
   }
 }
+export async function validarYGuardarExplicacion(req, res) {
+  try {
+    const {
+      actividadId,
+      actividadTitulo,
+      idPendiente,
+      nombrePendiente,
+      explicacion,
+      duracionMin,
+      sessionId
+    } = req.body;
+    console.log("req.body:", req.body);
+
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const odooUserId = decoded.id;
+
+    console.log(odooUserId)
+
+    if (!actividadId || !idPendiente || !explicacion) {
+      console.error("Datos incompletos");
+      return res.status(400).json({ error: "Datos incompletos" });
+    }
+
+    const prompt = `
+Tu tarea es evaluar si la explicación del usuario corresponde, por INTENCIÓN GENERAL, al pendiente asignado.
+
+CONTEXTO:
+El usuario está explicando qué hará durante el pendiente.
+ACTIVIDAD:
+"${actividadTitulo}"
+
+PENDIENTE:
+"${nombrePendiente}"
+
+EXPLICACIÓN:
+"${explicacion}"
+
+TIEMPO:
+${duracionMin}
+
+Reglas:
+- La explicación proviene de VOZ A TEXTO y puede contener errores graves de pronunciación, palabras incorrectas o frases sin sentido literal.
+- Debes evaluar la INTENCIÓN, no la redacción exacta.
+- Acepta sinónimos, palabras mal reconocidas y referencias indirectas.
+- esValida = true SOLO si la explicación está relacionada con el pendiente.
+- No inventes información.
+
+Responde ÚNICAMENTE en JSON:
+{
+  "esValida": boolean,
+  "razon": string
+}
+`;
+    const aiResult = await smartAICall(prompt);
+
+    console.log("🤖 AI RESULT:", aiResult);
+
+    if (!aiResult || !aiResult.text) {
+      return res.status(503).json({
+        error: "La IA no respondió correctamente",
+      });
+    }
+
+    const aiEvaluation = parseAIJSONSafe(aiResult.text);
+
+    if (!aiEvaluation.esValida) {
+      return res.status(200).json({
+        esValida: false,
+        razon: aiEvaluation.razon,
+      });
+    }
+
+    const resultado = await ActividadesSchema.findOneAndUpdate(
+      {
+        odooUserId: odooUserId,
+        "actividades.actividadId": actividadId,
+        "actividades.pendientes.pendienteId": idPendiente
+      },
+      {
+        $set: {
+          "actividades.$[act].pendientes.$[pend].descripcion": explicacion,
+          "actividades.$[act].ultimaActualizacion": new Date()
+        }
+      },
+      {
+        arrayFilters: [
+          { "act.actividadId": actividadId },
+          { "pend.pendienteId": idPendiente }
+        ],
+        new: true,
+        runValidators: true
+      }
+    );
+
+    if (!resultado) {
+      return res.status(404).json({ error: "No se pudo actualizar" });
+    }
+
+    // ✅ Log inmediato
+    const actividadActualizada = resultado.actividades.find(
+      a => a.actividadId === actividadId
+    );
+
+    const pendienteGuardado = actividadActualizada?.pendientes.find(
+      p => p.pendienteId === idPendiente
+    );
+
+    console.log("📝 DESCRIPCIÓN EN MEMORIA:", pendienteGuardado?.descripcion);
+
+    // 🔍 VERIFICACIÓN INDEPENDIENTE DIRECTO DE LA DB
+    const verificacionDB = await ActividadesSchema.findOne({
+      odooUserId: odooUserId,
+      "actividades.actividadId": actividadId,
+    }).lean(); // .lean() devuelve objeto plano, más rápido
+
+    const actividadDB = verificacionDB?.actividades.find(
+      a => a.actividadId === actividadId
+    );
+
+    const pendienteDB = actividadDB?.pendientes.find(
+      p => p.pendienteId === idPendiente
+    );
+
+    console.log("🔍 VERIFICACIÓN DB (inmediata):", pendienteDB?.descripcion);
+    console.log("⚠️ ¿SON IGUALES?", pendienteGuardado?.descripcion === pendienteDB?.descripcion);
+
+    return res.status(200).json({
+      esValida: true,
+      mensaje: "Explicación validada y guardada",
+      debug: {
+        enMemoria: pendienteGuardado?.descripcion,
+        enDB: pendienteDB?.descripcion,
+        sonIguales: pendienteGuardado?.descripcion === pendienteDB?.descripcion
+      }
+    });
+
+    return res.status(200).json({
+      esValida: true,
+      mensaje: "Explicación validada y guardada",
+    });
+  } catch (error) {
+    console.error("❌ validarExplicacion error:", error);
+    return res.status(500).json({ error: "Error interno del servidor" });
+  }
+}
+
 export async function guardarExplicaciones(req, res) {
   try {
     const { explanations, sessionId } = sanitizeObject(req.body);
@@ -1147,3 +1350,86 @@ export async function obtenerHistorialSidebar(req, res) {
 }
 
 
+export async function obtenerTodasExplicacionesAdmin(req, res) {
+  try {
+    // const { token } = req.cookies;
+    // if (!token) {
+    //   return res.status(401).json({ success: false, message: "No autenticado" });
+    // }
+
+    // const decoded = jwt.verify(token, TOKEN_SECRET);
+    // const userId = decoded.id;
+    
+    // Verificar si es admin (podrías tener un campo 'rol' en el token)
+    // Por ahora, asumimos que todos pueden ver TODO
+    
+    // 1. Obtener TODOS los usuarios de ActividadesSchema
+    const todosUsuarios = await ActividadesSchema.find({})
+      .sort({ updatedAt: -1 })
+      .lean();
+    
+    // 2. Enriquecer con info de usuario si tienes Users collection
+    const usuariosEnriquecidos = await Promise.all(
+      todosUsuarios.map(async (usuarioDoc) => {
+        try {
+          // Si tienes una colección de usuarios, busca info adicional
+          const userInfo = await UserModel.findOne({ _id: usuarioDoc.odooUserId }).lean();
+          
+          return {
+            ...usuarioDoc,
+            userInfo: userInfo || null,
+            email: userInfo?.email || "No disponible",
+            nombre: userInfo?.nombre || userInfo?.username || "Usuario",
+            avatar: userInfo?.avatar,
+            rol: userInfo?.rol || "user"
+          };
+        } catch (err) {
+          console.warn(`Error enriqueciendo usuario ${usuarioDoc.odooUserId}:`, err);
+          return {
+            ...usuarioDoc,
+            userInfo: null,
+            email: "Error al cargar",
+            nombre: `Usuario ${usuarioDoc.odooUserId.substring(0, 8)}`,
+            rol: "user"
+          };
+        }
+      })
+    );
+
+    // 3. Calcular estadísticas generales
+    const estadisticas = {
+      totalUsuarios: todosUsuarios.length,
+      totalActividades: todosUsuarios.reduce((sum, u) => sum + (u.actividades?.length || 0), 0),
+      totalTareas: todosUsuarios.reduce((sum, u) => 
+        sum + (u.actividades?.reduce((sumAct, act) => sumAct + (act.pendientes?.length || 0), 0) || 0), 0),
+      totalTareasTerminadas: todosUsuarios.reduce((sum, u) => 
+        sum + (u.actividades?.reduce((sumAct, act) => 
+          sumAct + (act.pendientes?.filter(p => p.terminada)?.length || 0), 0) || 0), 0),
+      tiempoTotalMinutos: todosUsuarios.reduce((sum, u) => 
+        sum + (u.actividades?.reduce((sumAct, act) => 
+          sumAct + (act.pendientes?.reduce((sumP, p) => sumP + (p.duracionMin || 0), 0) || 0), 0) || 0), 0),
+    };
+
+    // 4. Devolver respuesta estructurada
+    return res.json({
+      success: true,
+      data: {
+        usuarios: usuariosEnriquecidos,
+        estadisticas,
+        metadata: {
+          fecha: new Date().toISOString(),
+          totalRegistros: todosUsuarios.length,
+          usuarioSolicitante: userId
+        }
+      }
+    });
+
+  } catch (error) {
+    console.error("❌ Error en obtenerTodasExplicacionesAdmin:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error interno del servidor",
+      error: error.message
+    });
+  }
+}

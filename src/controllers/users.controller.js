@@ -1,10 +1,9 @@
 import axios from "axios";
-
-const urlApi = "https://wlserver-production-6735.up.railway.app";
+import { API_URL_ANFETA } from "../config.js";
 
 export const getAllUsers = async () => {
   try {
-    const response = await axios.get(`${urlApi}/users/search`);
+    const response = await axios.get(`${API_URL_ANFETA}/users/search`);
 
     const usersClean = response.data.items.map(user => ({
       id: user.collaboratorId,

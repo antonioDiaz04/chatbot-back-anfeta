@@ -17,3 +17,5 @@ export const GROQ_API_KEY_2 = process.env.GROQ_API_KEY_2; //esta es mi cuenta pe
 //Credenciales
 export const TOKEN_SECRET = process.env.TOKEN_SECRET;
 export const JWT_SECRET = process.env.JWT_SECRET;
+
+export const API_URL_ANFETA = process.env.API_URL_ANFETA || "https://wlserver-production-6735.up.railway.app/api";

@@ -15,7 +15,9 @@ import {
   obtenerHistorialSidebar,
   guardarExplicaciones,
   validarExplicacion,
-  obtenerActividadesConTiempoHoy
+  validarYGuardarExplicacion,
+  obtenerActividadesConTiempoHoy,
+  obtenerTodasExplicacionesAdmin
 } from '../controllers/assistant.controller.js';
 
 
@@ -24,11 +26,14 @@ router.get('/historial/sesion/:sessionId', obtenerHistorialSesion);
 router.get('/historial/usuario', obtenerTodoHistorialSesion);
 router.get('/historial/titulos', obtenerHistorialSidebar);
 
+// funcion para obtener todo los reportes de obtenerExplicacionesUsuario
+router.get('/admin/todas-explicaciones', obtenerTodasExplicacionesAdmin);
 
 // Rutas de actividades/pendientes
 router.get('/actividades/hoy/con-tiempo', obtenerActividadesConTiempoHoy);
 router.put('/actividades/pendientes/actualizar', actualizarEstadoPendientes);
 router.post('/validar-explicacion', validarExplicacion);
+router.post('/validar-guardar-explicacion', validarYGuardarExplicacion);
 router.post('/guardar-explicaciones', guardarExplicaciones);
 router.post('/actividades-con-revisiones', getActividadesConRevisiones);
 router.post('/confirmarEstadoPendientes', confirmarEstadoPendientes);
