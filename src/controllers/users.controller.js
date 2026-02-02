@@ -1,6 +1,6 @@
 import axios from "axios";
 
-const urlApi = "https://wlserver-production.up.railway.app/api";
+const urlApi = "https://wlserver-production-6735.up.railway.app/api";
 
 export const getAllUsers = async () => {
   try {
