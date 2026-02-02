@@ -5,7 +5,7 @@ import { isGeminiQuotaError } from '../libs/geminiRetry.js'
 import { sanitizeObject } from '../libs/sanitize.js'
 import { parseAIJSONSafe, smartAICall } from '../libs/aiService.js';
 import { generarSessionIdDiario } from '../libs/generarSessionIdDiario.js';
-import { horaAMinutos } from '../libs/horaAMinutos.js';
+import memoriaService from '../Helpers/MemoriaService.helpers.js';
 import ActividadesSchema from "../models/actividades.model.js";
 import HistorialBot from "../models/historialBot.model.js";
 import { TOKEN_SECRET, API_URL_ANFETA } from '../config.js';
@@ -1430,6 +1430,258 @@ export async function obtenerTodasExplicacionesAdmin(req, res) {
       success: false,
       message: "Error interno del servidor",
       error: error.message
+    });
+  }
+}
+
+export async function consultarIA(req, res) {
+  try {
+    const { mensaje } = sanitizeObject(req.body);
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const { id: userId } = decoded;
+
+    if (!mensaje || mensaje.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "El mensaje es obligatorio"
+      });
+    }
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "Usuario no autenticado"
+      });
+    }
+
+    const contextoMemoria = await memoriaService.generarContextoIA(userId, mensaje);
+
+    const { historial } = await memoriaService.obtenerHistorial(userId, 5);
+    const contextoHistorial = historial && historial.length > 0
+      ? historial.map(h => `${h.ia === 'usuario' ? 'Usuario' : 'Asistente'}: ${h.resumenConversacion}`).join('\n')
+      : '';
+
+    const prompt = `Eres un asistente personal inteligente y versátil. Puedes hablar de cualquier tema de forma natural.
+
+CONTEXTO DEL USUARIO:
+${contextoMemoria || 'Esta es la primera vez que hablas con este usuario.'}
+
+${contextoHistorial ? `CONVERSACIÓN RECIENTE:\n${contextoHistorial}\n` : ''}
+
+MENSAJE ACTUAL DEL USUARIO:
+"${mensaje}"
+
+INSTRUCCIONES:
+1. Responde de forma natural y amigable
+2. Puedes hablar de cualquier tema: tecnología, vida cotidiana, consejos, preguntas generales, etc.
+3. No te limites a un solo tema, sé flexible
+4. Si el usuario solo dice "hola", responde con un saludo simple y natural, no asumas que necesita ayuda con algo específico
+5. Si el usuario te dice gracias, responde con un "No te preocupes" o "De nada" lo importante es que no malgastes recursos allí
+6. Si menciona información nueva sobre él, tómalo en cuenta
+7. No inventes información que no tienes
+8. Sé directo y conciso
+9. No digas que eres un modelo de lenguaje
+
+FORMATO DE RESPUESTA (JSON sin markdown):
+{
+  "deteccion": "general" | "conversacional" | "técnico",
+  "razon": "Breve razón de tu clasificación",
+  "respuesta": "Tu respuesta natural y útil"
+}`;
+    const aiResult = await smartAICall(prompt);
+
+    // Limpiar respuesta
+    let textoLimpio = aiResult.text.trim();
+
+    // Remover markdown si existe
+    if (textoLimpio.includes('```')) {
+      textoLimpio = textoLimpio.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    }
+
+    const respuestaIA = parseAIJSONSafe(textoLimpio);
+
+    // Validar respuesta
+    if (!respuestaIA || !respuestaIA.respuesta) {
+      console.error('❌ Respuesta de IA inválida:', aiResult.text);
+
+      // Fallback: intentar extraer al menos el texto
+      return res.status(200).json({
+        success: true,
+        respuesta: "Disculpa, tuve un problema al procesar tu mensaje. ¿Podrías ser más específico?"
+      });
+    }
+
+    const mensajeCorto = mensaje.length > 150
+      ? mensaje.substring(0, 150) + '...'
+      : mensaje;
+
+    const respuestaCorta = respuestaIA.respuesta.length > 150
+      ? respuestaIA.respuesta.substring(0, 150) + '...'
+      : respuestaIA.respuesta;
+
+    await memoriaService.agregarHistorial(userId, 'usuario', mensajeCorto);
+    await memoriaService.agregarHistorial(userId, 'ia', respuestaCorta);
+
+    return res.status(200).json({
+      success: true,
+      respuesta: respuestaIA.respuesta.trim(),
+      deteccion: respuestaIA.deteccion
+    });
+
+  } catch (error) {
+    console.error("❌ Error en consultarIA:", error);
+
+    // Log más detallado
+    if (error.response) {
+      console.error('Error de API:', error.response.data);
+    } else if (error.request) {
+      console.error('Error de red:', error.message);
+    } else {
+      console.error('Error:', error.message);
+    }
+
+    return res.status(500).json({
+      success: false,
+      error: "Error al conectar con el servicio de IA. Por favor, intenta nuevamente."
+    });
+  }
+}
+export async function consultarIAProyecto(req, res) {
+  try {
+    const { mensaje } = sanitizeObject(req.body);
+    const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const { id: userId, email } = decoded;
+
+    if (!mensaje || mensaje.trim().length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "El mensaje es obligatorio"
+      });
+    }
+
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "Usuario no autenticado"
+      });
+    }
+
+    const contextoMemoria = await memoriaService.generarContextoIA(userId, mensaje);
+
+    const registros = await ActividadesSchema.find({ odooUserId: userId }).lean();
+    const actividadesResumidas = registros.flatMap(reg =>
+      reg.actividades.map(act => {
+        const nombresPendientes = act.pendientes
+          ?.filter(p => p.nombre)
+          .map(p => p.nombre) || [];
+
+        return {
+          actividad: act.titulo || "Sin título",
+          pendientes: nombresPendientes,
+          estado: act.estado || "sin estado"
+        };
+      })
+    );
+
+    const tieneActividades = actividadesResumidas.length > 0;
+
+    const { historial } = await memoriaService.obtenerHistorial(userId, 5);
+    const contextoHistorial = historial && historial.length > 0
+      ? historial.map(h => `${h.ia === 'usuario' ? 'Usuario' : 'Asistente'}: ${h.resumenConversacion}`).join('\n')
+      : '';
+
+    const prompt = `Eres un asistente personal inteligente. Tu trabajo es responder de forma natural, útil y relevante.
+
+CONTEXTO DEL USUARIO:
+${contextoMemoria || 'Primera interacción con este usuario.'}
+
+${contextoHistorial ? `CONVERSACIÓN RECIENTE:\n${contextoHistorial}\n` : ''}
+
+${tieneActividades ? `ACTIVIDADES Y PENDIENTES DEL USUARIO:\n${JSON.stringify(actividadesResumidas, null, 2)}\n` : 'El usuario no tiene actividades registradas.\n'}
+
+MENSAJE ACTUAL DEL USUARIO:
+"${mensaje}"
+
+INSTRUCCIONES:
+1. Lee cuidadosamente el mensaje del usuario
+2. Si pregunta sobre sus actividades/proyectos/pendientes, usa la información de ACTIVIDADES
+3. Si pregunta algo general, responde con conocimiento general
+4. Si menciona información nueva sobre él (nombre, gustos, trabajo), tómalo en cuenta
+5. NO inventes información que no tienes
+6. NO asumas cosas del usuario que no están en el contexto
+7. Sé directo y natural en tu respuesta
+
+FORMATO DE RESPUESTA (JSON sin markdown):
+{
+  "deteccion": "proyecto" | "general" | "conversacional",
+  "razon": "Breve razón de tu clasificación",
+  "respuesta": "Tu respuesta natural y útil"
+}`;
+
+    const aiResult = await smartAICall(prompt);
+
+    // Limpiar respuesta
+    let textoLimpio = aiResult.text.trim();
+
+    // Remover markdown si existe
+    if (textoLimpio.includes('```')) {
+      textoLimpio = textoLimpio.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+    }
+
+    const respuestaIA = parseAIJSONSafe(textoLimpio);
+
+    // Validar respuesta
+    if (!respuestaIA || !respuestaIA.respuesta) {
+      console.error('❌ Respuesta de IA inválida:', aiResult.text);
+
+      // Fallback: intentar extraer al menos el texto
+      return res.status(200).json({
+        success: true,
+        respuesta: "Disculpa, tuve un problema al procesar tu mensaje. ¿Podrías ser más específico?"
+      });
+    }
+
+    const extraccion = await memoriaService.extraerConIA(
+      userId,
+      email,
+      mensaje,
+      respuestaIA.respuesta
+    );
+
+    const mensajeCorto = mensaje.length > 150
+      ? mensaje.substring(0, 150) + '...'
+      : mensaje;
+
+    const respuestaCorta = respuestaIA.respuesta.length > 150
+      ? respuestaIA.respuesta.substring(0, 150) + '...'
+      : respuestaIA.respuesta;
+
+    await memoriaService.agregarHistorial(userId, 'usuario', mensajeCorto);
+    await memoriaService.agregarHistorial(userId, 'ia', respuestaCorta);
+
+    return res.status(200).json({
+      success: true,
+      respuesta: respuestaIA.respuesta.trim(),
+      deteccion: respuestaIA.deteccion
+    });
+
+  } catch (error) {
+    console.error("❌ Error en consultarIA:", error);
+
+    // Log más detallado
+    if (error.response) {
+      console.error('Error de API:', error.response.data);
+    } else if (error.request) {
+      console.error('Error de red:', error.message);
+    } else {
+      console.error('Error:', error.message);
+    }
+
+    return res.status(500).json({
+      success: false,
+      error: "Error al conectar con el servicio de IA. Por favor, intenta nuevamente."
     });
   }
 }

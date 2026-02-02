@@ -4,7 +4,9 @@ const router = Router();
 import {
   getActividadesConRevisiones,
   confirmarEstadoPendientes,
-  actualizarEstadoPendientes
+  actualizarEstadoPendientes,
+  consultarIA,
+  consultarIAProyecto
 } from '../controllers/assistant.controller.js';
 
 import {
@@ -37,6 +39,10 @@ router.post('/validar-guardar-explicacion', validarYGuardarExplicacion);
 router.post('/guardar-explicaciones', guardarExplicaciones);
 router.post('/actividades-con-revisiones', getActividadesConRevisiones);
 router.post('/confirmarEstadoPendientes', confirmarEstadoPendientes);
+
+router.post('/consultar-ia', consultarIA);
+router.post('/consultar-ia-proyecto', consultarIAProyecto);
+
 
 
 // Rutas de historial
