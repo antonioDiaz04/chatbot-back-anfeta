@@ -547,8 +547,6 @@ RESPONDE SOLO EL TÍTULO
   }
 }
 
-
-
 export async function obtenerActividadesConTiempoHoy(req, res) {
   try {
     const { token } = req.cookies;
