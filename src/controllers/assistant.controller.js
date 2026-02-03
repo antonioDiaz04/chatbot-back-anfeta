@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken';
 import { isGeminiQuotaError } from '../libs/geminiRetry.js'
 import { sanitizeObject } from '../libs/sanitize.js'
 import { parseAIJSONSafe, smartAICall } from '../libs/aiService.js';
-import { generarSessionIdDiario } from '../libs/generarSessionIdDiario.js';
+import { generarSessionIdDiario, esPrimeraSesionDelDia, } from '../libs/generarSessionIdDiario.js';
 import memoriaService from '../Helpers/MemoriaService.helpers.js';
 import ActividadesSchema from "../models/actividades.model.js";
 import HistorialBot from "../models/historialBot.model.js";
@@ -36,7 +36,7 @@ export async function getActividadesConRevisiones(req, res) {
     const decoded = jwt.verify(token, TOKEN_SECRET);
     const odooUserId = decoded.id;
 
-    const sessionId = generarSessionIdDiario(odooUserId);
+    const sessionId = await generarSessionIdDiario(odooUserId);
 
 
     // 1️ Obtener actividades del día para el usuario
@@ -547,6 +547,8 @@ RESPONDE SOLO EL TÍTULO
   }
 }
 
+
+
 export async function obtenerActividadesConTiempoHoy(req, res) {
   try {
     const { token } = req.cookies;
@@ -630,15 +632,13 @@ export async function obtenerActividadesConTiempoHoy(req, res) {
   }
 }
 
-
-// 
 // nueva funcio
 export const obtenerExplicacionesUsuario = async (req, res) => {
   try {
     const { odooUserId } = req.params; // O desde el token
-    
+
     const registroUsuario = await ActividadesSchema.findOne({ odooUserId });
-    
+
     if (!registroUsuario) {
       return res.status(404).json({
         success: false,
@@ -646,7 +646,7 @@ export const obtenerExplicacionesUsuario = async (req, res) => {
         data: []
       });
     }
-    
+
     // Extraer todas las explicaciones en formato plano
     const todasExplicaciones = registroUsuario.actividades.reduce((acc, actividad) => {
       actividad.pendientes.forEach(pendiente => {
@@ -669,14 +669,14 @@ export const obtenerExplicacionesUsuario = async (req, res) => {
       });
       return acc;
     }, []);
-    
+
     return res.status(200).json({
       success: true,
       total: todasExplicaciones.length,
       data: todasExplicaciones,
       ultimaSincronizacion: registroUsuario.ultimaSincronizacion
     });
-    
+
   } catch (error) {
     console.error("Error al obtener explicaciones:", error);
     return res.status(500).json({
@@ -741,6 +741,10 @@ export async function validarExplicacion(req, res) {
     const { taskName, explanation, activityTitle } = sanitizeObject(req.body);
 
     const { token } = req.cookies;
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const odooUserId = decoded.id;
+
+    const sessionId = await generarSessionIdDiario(odooUserId);
 
 
 
@@ -1359,22 +1363,22 @@ export async function obtenerTodasExplicacionesAdmin(req, res) {
 
     // const decoded = jwt.verify(token, TOKEN_SECRET);
     // const userId = decoded.id;
-    
+
     // Verificar si es admin (podrías tener un campo 'rol' en el token)
     // Por ahora, asumimos que todos pueden ver TODO
-    
+
     // 1. Obtener TODOS los usuarios de ActividadesSchema
     const todosUsuarios = await ActividadesSchema.find({})
       .sort({ updatedAt: -1 })
       .lean();
-    
+
     // 2. Enriquecer con info de usuario si tienes Users collection
     const usuariosEnriquecidos = await Promise.all(
       todosUsuarios.map(async (usuarioDoc) => {
         try {
           // Si tienes una colección de usuarios, busca info adicional
           const userInfo = await UserModel.findOne({ _id: usuarioDoc.odooUserId }).lean();
-          
+
           return {
             ...usuarioDoc,
             userInfo: userInfo || null,
@@ -1400,13 +1404,13 @@ export async function obtenerTodasExplicacionesAdmin(req, res) {
     const estadisticas = {
       totalUsuarios: todosUsuarios.length,
       totalActividades: todosUsuarios.reduce((sum, u) => sum + (u.actividades?.length || 0), 0),
-      totalTareas: todosUsuarios.reduce((sum, u) => 
+      totalTareas: todosUsuarios.reduce((sum, u) =>
         sum + (u.actividades?.reduce((sumAct, act) => sumAct + (act.pendientes?.length || 0), 0) || 0), 0),
-      totalTareasTerminadas: todosUsuarios.reduce((sum, u) => 
-        sum + (u.actividades?.reduce((sumAct, act) => 
+      totalTareasTerminadas: todosUsuarios.reduce((sum, u) =>
+        sum + (u.actividades?.reduce((sumAct, act) =>
           sumAct + (act.pendientes?.filter(p => p.terminada)?.length || 0), 0) || 0), 0),
-      tiempoTotalMinutos: todosUsuarios.reduce((sum, u) => 
-        sum + (u.actividades?.reduce((sumAct, act) => 
+      tiempoTotalMinutos: todosUsuarios.reduce((sum, u) =>
+        sum + (u.actividades?.reduce((sumAct, act) =>
           sumAct + (act.pendientes?.reduce((sumP, p) => sumP + (p.duracionMin || 0), 0) || 0), 0) || 0), 0),
     };
 
@@ -1682,6 +1686,76 @@ FORMATO DE RESPUESTA (JSON sin markdown):
     return res.status(500).json({
       success: false,
       error: "Error al conectar con el servicio de IA. Por favor, intenta nuevamente."
+    });
+  }
+}
+
+export async function obtenerMensajesConversacion(req, res) {
+  try {
+    const { sessionId } = req.params;
+    const { token } = req.cookies;
+
+    if (!token) {
+      return res.status(401).json({
+        success: false,
+        message: "No autenticado"
+      });
+    }
+
+    const decoded = jwt.verify(token, TOKEN_SECRET);
+    const userId = decoded.id;
+
+    // Buscar el historial específico
+    const historial = await HistorialBot.findOne({
+      userId,
+      sessionId
+    }).lean();
+
+    if (!historial) {
+      return res.status(404).json({
+        success: false,
+        message: "Conversación no encontrada"
+      });
+    }
+
+    // Buscar también las actividades asociadas
+    const actividadesCache = await ActividadesSchema.findOne({
+      odooUserId: userId
+    }).lean();
+
+    // Transformar mensajes al formato del frontend
+    const mensajesFormateados = (historial.mensajes || []).map(msg => ({
+      id: msg._id?.toString() || `${Date.now()}-${Math.random()}`,
+      type: msg.role === 'usuario' ? 'user' :
+        msg.role === 'bot' ? 'bot' : 'system',
+      content: msg.contenido,
+      timestamp: new Date(msg.timestamp),
+      tipoMensaje: msg.tipoMensaje,
+      analisis: msg.analisis || null
+    }));
+
+    return res.json({
+      success: true,
+      sessionId: historial.sessionId,
+      nombreConversacion: historial.nombreConversacion,
+      mensajes: mensajesFormateados,
+      ultimoAnalisis: historial.ultimoAnalisis || null,
+      tareasEstado: historial.tareasEstado || [],
+      estadoConversacion: historial.estadoConversacion,
+      actividades: actividadesCache?.actividades || [],
+      meta: {
+        totalMensajes: mensajesFormateados.length,
+        createdAt: historial.createdAt,
+        updatedAt: historial.updatedAt
+      }
+    });
+
+  } catch (error) {
+    console.error("❌ Error al obtener mensajes de conversación:", error);
+    return res.status(500).json({
+      success: false,
+      message: "Error interno del servidor",
+      error: error.message
     });
   }
 }

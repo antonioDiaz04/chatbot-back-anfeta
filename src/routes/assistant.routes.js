@@ -6,7 +6,8 @@ import {
   confirmarEstadoPendientes,
   actualizarEstadoPendientes,
   consultarIA,
-  consultarIAProyecto
+  consultarIAProyecto,
+  obtenerMensajesConversacion
 } from '../controllers/assistant.controller.js';
 
 import {
@@ -43,6 +44,7 @@ router.post('/confirmarEstadoPendientes', confirmarEstadoPendientes);
 router.post('/consultar-ia', consultarIA);
 router.post('/consultar-ia-proyecto', consultarIAProyecto);
 
+router.get('/historial/:sessionId/mensajes', obtenerMensajesConversacion);
 
 
 // Rutas de historial

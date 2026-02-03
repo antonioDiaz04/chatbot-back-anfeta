@@ -60,6 +60,8 @@ app.use(`/api/${API_VERSION}/admin`, adminRouter);
 app.use(`/api/${API_VERSION}/auth`, authRoutes);
 app.use(`/api/${API_VERSION}/reportes`, reportesRoutes);
 
+
+
 // Server
 app.listen(PORT, () => {
   textoColorido(

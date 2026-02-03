@@ -7,7 +7,7 @@ class MemoriaService {
   // CATEGORÍAS VÁLIDAS (constante de clase)
   // ============================================
   static CATEGORIAS_VALIDAS = ['preferencias', 'personal', 'trabajo', 'habilidades', 'objetivos', 'general', 'conversaciones'];
-  static MAX_HISTORIAL = 50;
+  static MAX_HISTORIAL = 15;
   static LONGITUD_MINIMA_INFO = 10;
   static UMBRAL_SIMILITUD = 0.85; // 85% de similitud = duplicado
 
