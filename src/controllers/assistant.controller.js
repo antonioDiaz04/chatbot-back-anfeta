@@ -192,7 +192,7 @@ export async function getActividadesConRevisiones(req, res) {
       if (revisionesResponse.data?.success) {
         todasRevisiones = revisionesResponse.data.data || { colaboradores: [] };
       }
-    } catch (error) { 
+    } catch (error) {
       console.error("❌ Error obteniendo revisiones:", {
         message: error.message,
         response: error.response?.data,
@@ -405,6 +405,10 @@ INSTRUCCIONES ESTRICTAS DE RESPUESTA:
 
     const aiResult = await smartAICall(prompt);
 
+    const actividadesGuardadas = await ActividadesSchema.findOne({
+      odooUserId: odooUserId
+    });
+
     const respuestaData = {
       actividades: actividadesFinales.map(a => ({
         id: a.id,
@@ -420,11 +424,27 @@ INSTRUCCIONES ESTRICTAS DE RESPUESTA:
           const revisiones = revisionesPorActividad[actividad.id];
           if (!revisiones || revisiones.pendientesConTiempo.length === 0) return null;
 
+          const actividadGuardada = actividadesGuardadas?.actividades?.find(
+            a => a.actividadId === actividad.id
+          );
+
+
           return {
             actividadId: actividad.id,
             actividadTitulo: actividad.titulo,
             actividadHorario: `${actividad.horaInicio} - ${actividad.horaFin}`,
-            tareasConTiempo: revisiones.pendientesConTiempo,
+            tareasConTiempo: revisiones.pendientesConTiempo.map(tarea => {
+              // Buscar descripción en la actividad guardada
+              const pendienteGuardado = actividadGuardada?.pendientes?.find(
+                p => p.pendienteId === tarea.id
+              );
+
+              return {
+                ...tarea,
+                descripcion: pendienteGuardado?.descripcion || "" // ✅ INCLUIR DESCRIPCIÓN
+              };
+            }),
+
             totalTareasConTiempo: revisiones.pendientesConTiempo.length,
             tareasAltaPrioridad: revisiones.pendientesConTiempo.filter(t => t.prioridad === "ALTA").length,
             tiempoTotal: revisiones.pendientesConTiempo.reduce((sum, t) => sum + (t.duracionMin || 0), 0),
@@ -501,6 +521,10 @@ RESPONDE SOLO EL TÍTULO
       console.warn("No se pudo generar nombre de conversación con IA");
     }
 
+    const actividadesExistentes = await ActividadesSchema.findOne({
+      odooUserId: odooUserId
+    });
+
     const actividadesParaGuardar = actividadesFinales
       .map(actividad => {
         const revisiones = revisionesPorActividad[actividad.id];
@@ -510,6 +534,11 @@ RESPONDE SOLO EL TÍTULO
           ...(revisiones.pendientesSinTiempo || [])
         ];
 
+        // Buscar la actividad existente para preservar descripciones
+        const actividadExistente = actividadesExistentes?.actividades?.find(
+          a => a.actividadId === actividad.id
+        );
+
         return {
           actividadId: actividad.id,
           titulo: actividad.titulo,
@@ -517,19 +546,31 @@ RESPONDE SOLO EL TÍTULO
           horaFin: actividad.horaFin,
           status: actividad.status,
           fecha: new Date().toISOString().split('T')[0],
-          pendientes: todasLasTareas.map(t => ({
-            pendienteId: t.id,
-            nombre: t.nombre,
-            descripcion: "",
-            terminada: t.terminada,
-            confirmada: t.confirmada,
-            duracionMin: t.duracionMin,
-            fechaCreacion: t.fechaCreacion,
-            fechaFinTerminada: t.fechaFinTerminada
-          })),
+          pendientes: todasLasTareas.map(t => {
+            // Buscar el pendiente existente
+            const pendienteExistente = actividadExistente?.pendientes?.find(
+              p => p.pendienteId === t.id
+            );
+
+            return {
+              pendienteId: t.id,
+              nombre: t.nombre,
+              // ✅ SOLO actualizar si la nueva descripción NO está vacía
+              // Si está vacía, mantener la existente
+              descripcion: t.descripcion && t.descripcion.trim() !== ""
+                ? t.descripcion
+                : (pendienteExistente?.descripcion || ""),
+              terminada: t.terminada,
+              confirmada: t.confirmada,
+              duracionMin: t.duracionMin,
+              fechaCreacion: t.fechaCreacion,
+              fechaFinTerminada: t.fechaFinTerminada
+            };
+          }),
           ultimaActualizacion: new Date()
         };
       });
+
 
     await ActividadesSchema.findOneAndUpdate(
       { odooUserId: odooUserId },
@@ -552,6 +593,7 @@ RESPONDE SOLO EL TÍTULO
       msg => msg.tipoMensaje === "analisis_inicial"
     );
 
+    // Si no existe un analisis inicial, procede
     if (!yaExisteAnalisisInicial) {
 
       await HistorialBot.findOneAndUpdate(
