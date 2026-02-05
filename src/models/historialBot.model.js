@@ -106,7 +106,7 @@ const MensajeSchema = new mongoose.Schema({
     },
     contenido: {
         type: String,
-        required: true
+        default: ""
     },
     timestamp: {
         type: Date,
@@ -143,7 +143,8 @@ const HistorialSchema = new mongoose.Schema(
         },
         mensajes: {
             type: [MensajeSchema],
-            default: []
+            default: [],
+            $slice: -30
         },
         ultimoAnalisis: {
             type: AnalisisCompletoSchema,
@@ -171,7 +172,11 @@ const HistorialSchema = new mongoose.Schema(
     { timestamps: true }
 );
 
-HistorialSchema.index({ userId: 1, sessionId: 1 }, { unique: true });
+HistorialSchema.index(
+    { userId: 1, sessionId: 1 },
+    { unique: true }
+);
 HistorialSchema.index({ userId: 1, createdAt: -1 });
+HistorialSchema.index({ userId: 1, updatedAt: -1 });
 
 export default mongoose.model("HistorialBot", HistorialSchema);

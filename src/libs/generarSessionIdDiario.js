@@ -1,60 +1,79 @@
-
-
-// export function generarSessionIdDiario( idUser) {
-//   const fecha = new Date().toISOString().split('T')[0]; // "2026-01-20"
-//   return `Act_${idUser}_${fecha}`.replace(/[^a-zA-Z0-9_]/g, '_');
-// }
-
-import ActividadesSchema from "../models/actividades.model.js";
-
-export function generarSessionBase(idUser) {
-  const fecha = new Date();
-  const yyyy = fecha.getFullYear();
-  const mm = String(fecha.getMonth() + 1).padStart(2, "0");
-  const dd = String(fecha.getDate()).padStart(2, "0");
-
-  return `Act_${idUser}_${yyyy}_${mm}_${dd}`;
-}
+import HistorialBot from "../models/historialBot.model.js";
 
 export async function generarSessionIdDiario(idUser) {
   const base = generarSessionBase(idUser);
 
-  // Buscar la última sesión del día
-  const ultima = await ActividadesSchema.findOne({
+  const ultima = await HistorialBot.findOne({
     sessionId: { $regex: `^${base}` }
   })
     .sort({ createdAt: -1 })
     .lean();
 
-  // Si no existe ninguna → esta es la primera (sin número)
-  if (!ultima) {
-    return base;
-  }
+  if (!ultima) return base;
 
   const partes = ultima.sessionId.split("_");
-  const ultimoValor = Number(partes[partes.length - 1]);
+  const ultimo = Number(partes[partes.length - 1]);
 
-  // Caso: la última NO tenía número → ahora toca _2
-  if (isNaN(ultimoValor)) {
-    return `${base}_2`;
-  }
-
-  // Caso normal: incrementar
-  return `${base}_${ultimoValor + 1}`;
+  return isNaN(ultimo) ? `${base}_2` : `${base}_${ultimo + 1}`;
 }
 
-
-export async function esPrimeraSesionDelDia(idUser) {
-  const fecha = new Date();
-  const yyyy = fecha.getFullYear();
-  const mm = String(fecha.getMonth() + 1).padStart(2, "0");
-  const dd = String(fecha.getDate()).padStart(2, "0");
-
-  const base = `Act_${idUser}_${yyyy}_${mm}_${dd}`;
-
-  const existe = await ActividadesSchema.exists({
-    sessionId: { $regex: `^${base}` }
+function obtenerFechaMX() {
+  return new Date().toLocaleDateString("en-CA", {
+    timeZone: "America/Mexico_City"
   });
+}
 
-  return !existe; // true = primera del día
+export function generarSessionBase(idUser) {
+  const fecha = obtenerFechaMX(); // YYYY-MM-DD
+  return `Act_${idUser}_${fecha.replace(/-/g, "_")}`;
+}
+export async function obtenerSesionActivaDelDia(idUser) {
+  const base = generarSessionBase(idUser);
+
+  // ✅ OPERACIÓN ATÓMICA: Buscar o crear en una sola operación
+  const sesion = await HistorialBot.findOneAndUpdate(
+    {
+      userId: idUser,
+      sessionId: { $regex: `^${base}` }
+    },
+    {
+      $setOnInsert: {
+        userId: idUser,
+        sessionId: base,
+        nombreConversacion: `Chat ${new Date().toLocaleDateString("es-MX")}`,
+        estadoConversacion: "inicio",
+        tareasEstado: [],
+        ultimoAnalisis: null,
+        mensajes: []
+      }
+    },
+    {
+      upsert: true,
+      new: true,
+      sort: { createdAt: 1 },
+      setDefaultsOnInsert: true
+    }
+  );
+
+  if (sesion) {
+    return sesion.sessionId;
+  }
+
+  return base;
+}
+export async function generarNuevaSesionDelDia(idUser) {
+  const base = generarSessionBase(idUser);
+
+  const ultima = await HistorialBot.findOne({
+    sessionId: { $regex: `^${base}` }
+  })
+    .sort({ createdAt: -1 })
+    .lean();
+
+  if (!ultima) return base;
+
+  const partes = ultima.sessionId.split("_");
+  const ultimo = Number(partes[partes.length - 1]);
+
+  return isNaN(ultimo) ? `${base}_2` : `${base}_${ultimo + 1}`;
 }

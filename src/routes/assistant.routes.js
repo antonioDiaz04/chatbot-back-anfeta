@@ -7,14 +7,14 @@ import {
   actualizarEstadoPendientes,
   consultarIA,
   consultarIAProyecto,
-  obtenerMensajesConversacion
+  obtenerMensajesConversacion,
+  verificarAnalisisDelDia
 } from '../controllers/assistant.controller.js';
 
 import {
-  // getActividadesLocal,
+  obtenerOCrearSessionActual,
   obtenerHistorialSesion,
   obtenerTodoHistorialSesion,
-  // eliminarHistorialSesion,
   obtenerHistorialSidebar,
   guardarExplicaciones,
   validarExplicacion,
@@ -25,6 +25,7 @@ import {
 
 
 // Rutas de historial
+router.get("/session/actual", obtenerOCrearSessionActual);
 router.get('/historial/sesion/:sessionId', obtenerHistorialSesion);
 router.get('/historial/usuario', obtenerTodoHistorialSesion);
 router.get('/historial/titulos', obtenerHistorialSidebar);
@@ -45,6 +46,7 @@ router.post('/consultar-ia', consultarIA);
 router.post('/consultar-ia-proyecto', consultarIAProyecto);
 
 router.get('/historial/:sessionId/mensajes', obtenerMensajesConversacion);
+router.get('/analisis/verificar', verificarAnalisisDelDia);
 
 
 // Rutas de historial

@@ -199,13 +199,10 @@ class MemoriaService {
 
       const prompt = this._construirPromptExtraccion(mensajeUsuario, respuestaIA);
 
-      console.log('📝 Analizando conversación...');
-
       const resultado = await smartAICall(prompt);
       const data = this._parsearRespuestaIA(resultado.text);
 
       if (!data?.hayMemoria || !Array.isArray(data.memorias)) {
-        console.log('ℹ️  Sin memorias para guardar');
         return { success: true, cantidad: 0 };
       }
 
